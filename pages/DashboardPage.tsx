@@ -132,20 +132,63 @@ function escapeCSVField(value: string): string {
   return sanitized;
 }
 
-function exportAttendancesToCSV(records: any[]) {
-  const headers = ['日付', '社員名', '出勤', '退勤', '労働時間'];
-  const rows = records.map(r => [
-    r.date,
-    r.userName,
-    r.clockIn?.toDate?.().toLocaleTimeString?.() || '',
-    r.clockOut?.toDate?.().toLocaleTimeString?.() || '',
-    (typeof r.clockIn === 'object' && typeof r.clockOut === 'object') ? getWorkDuration(r.clockIn, r.clockOut) : ''
-  ]);
-  const csvContent = '\uFEFF' + headers.map(escapeCSVField).join(',') + '\n' + rows.map(e => e.map(escapeCSVField).join(',')).join('\n');
+function getWorkHours(clockIn: any, clockOut: any): number {
+  if (!clockIn?.toDate || !clockOut?.toDate) return 0;
+  const start = clockIn.toDate();
+  const end = clockOut.toDate();
+  return (end - start) / (1000 * 60 * 60);
+}
+
+function exportMonthlyCSV(records: any[], yearMonth: string) {
+  const [year, month] = yearMonth.split('-');
+  const filtered = records.filter(r => r.date?.startsWith(yearMonth));
+
+  // 社員ごとに集計
+  const summaryMap: Record<string, { userName: string; totalHours: number; days: number }> = {};
+  filtered.forEach(r => {
+    const key = r.userId || r.userName;
+    if (!summaryMap[key]) {
+      summaryMap[key] = { userName: r.userName, totalHours: 0, days: 0 };
+    }
+    const hours = getWorkHours(r.clockIn, r.clockOut);
+    summaryMap[key].totalHours += hours;
+    if (hours > 0) summaryMap[key].days += 1;
+  });
+
+  // 明細シート
+  const detailHeaders = ['日付', '社員名', '出勤', '退勤', '労働時間(h)'];
+  const detailRows = filtered
+    .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || '') || (a.userName || '').localeCompare(b.userName || ''))
+    .map(r => [
+      r.date,
+      r.userName,
+      r.clockIn?.toDate?.().toLocaleTimeString?.() || '',
+      r.clockOut?.toDate?.().toLocaleTimeString?.() || '',
+      getWorkHours(r.clockIn, r.clockOut).toFixed(2),
+    ]);
+
+  // 集計セクション
+  const summaryHeaders = ['社員名', '出勤日数', '合計労働時間(h)'];
+  const summaryRows = Object.values(summaryMap)
+    .sort((a, b) => a.userName.localeCompare(b.userName))
+    .map(s => [s.userName, String(s.days), s.totalHours.toFixed(2)]);
+
+  const lines: string[] = [];
+  lines.push(`${year}年${month}月 月次勤怠レポート`);
+  lines.push('');
+  lines.push('【月間集計】');
+  lines.push(summaryHeaders.map(escapeCSVField).join(','));
+  summaryRows.forEach(row => lines.push(row.map(escapeCSVField).join(',')));
+  lines.push('');
+  lines.push('【明細】');
+  lines.push(detailHeaders.map(escapeCSVField).join(','));
+  detailRows.forEach(row => lines.push(row.map(escapeCSVField).join(',')));
+
+  const csvContent = '\uFEFF' + lines.join('\n');
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `全従業員勤怠_${new Date().toISOString().slice(0, 10)}.csv`;
+  link.download = `勤怠レポート_${year}年${month}月.csv`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -173,6 +216,7 @@ const DashboardPage: React.FC = () => {
   const [requestLoading, setRequestLoading] = useState(false);
   const [requestSuccess, setRequestSuccess] = useState(false);
   const [requestError, setRequestError] = useState('');
+  const [selectedMonth, setSelectedMonth] = useState(() => dayjs().format('YYYY-MM'));
 
   useEffect(() => {
     if (!user) return;
@@ -469,12 +513,20 @@ const DashboardPage: React.FC = () => {
           boxShadow: '0 2px 12px #0001',
           padding: 24,
         }}>
-         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
            <h2 style={{ fontWeight: 'bold', fontSize: 20, color: '#222', margin: 0 }}>全従業員勤怠管理</h2>
-           <button
-             onClick={() => exportAttendancesToCSV(attendances)}
-             style={{ background: '#22c55e', color: '#fff', fontWeight: 'bold', border: 'none', borderRadius: 8, padding: '8px 20px', fontSize: 15, cursor: 'pointer', boxShadow: '0 1px 4px #0001' }}
-           >CSV出力</button>
+           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+             <input
+               type="month"
+               value={selectedMonth}
+               onChange={e => setSelectedMonth(e.target.value)}
+               style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 14 }}
+             />
+             <button
+               onClick={() => exportMonthlyCSV(attendances, selectedMonth)}
+               style={{ background: '#2563eb', color: '#fff', fontWeight: 'bold', border: 'none', borderRadius: 8, padding: '8px 16px', fontSize: 14, cursor: 'pointer', boxShadow: '0 1px 4px #0001', whiteSpace: 'nowrap' }}
+             >月次CSV出力</button>
+           </div>
          </div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15, minWidth: 600 }}>
@@ -488,15 +540,22 @@ const DashboardPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {attendances.map(a => (
-                  <tr key={a.id}>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.date}</td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.userName}</td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockIn?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockOut?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{getWorkDuration(a.clockIn, a.clockOut)}</td>
-                  </tr>
-                ))}
+                {attendances.filter(a => a.date?.startsWith(selectedMonth)).length === 0 ? (
+                  <tr><td colSpan={5} style={{ padding: 16, color: '#888', textAlign: 'center' }}>該当月のデータがありません</td></tr>
+                ) : (
+                  attendances
+                    .filter(a => a.date?.startsWith(selectedMonth))
+                    .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''))
+                    .map(a => (
+                    <tr key={a.id}>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.date}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.userName}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockIn?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockOut?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{getWorkDuration(a.clockIn, a.clockOut)}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
