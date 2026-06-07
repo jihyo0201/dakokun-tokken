@@ -1,0 +1,6 @@
+{
+  "name": "Web勤怠管理システム「だこくん」",
+  "description": "A simple and fair web-based time tracking system designed to eliminate illegal time rounding, ensure compliance with labor laws, and streamline attendance management for both employees and administrators.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}

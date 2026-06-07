@@ -1,0 +1,106 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getMyRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getMyRole() == 'admin';
+    }
+
+    function isSupervisor() {
+      return isAuthenticated() && getMyRole() == 'supervisor';
+    }
+
+    // usersコレクション
+    // - 自分のデータは読める / admin は全員読める
+    // - 自分のデータは名前だけ更新できる / admin は何でも更新できる
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isAuthenticated() && (
+        (request.auth.uid == userId && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])) ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // attendancesコレクション
+    // - 自分のデータは読める
+    // - admin は全員分読める
+    // - supervisor は部下のデータを読める
+    // - 作成は自分のuid or admin/supervisor（打刻修正承認時）
+    // - 更新は自分の clockOut、または admin/supervisor による打刻修正（承認後の反映）
+    match /attendances/{attendanceId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin() ||
+        (isSupervisor() && exists(/databases/$(database)/documents/users/$(resource.data.userId)) && get(/databases/$(database)/documents/users/$(resource.data.userId)).data.supervisorId == request.auth.uid)
+      );
+      allow create: if isAuthenticated() && (
+        request.resource.data.userId == request.auth.uid ||
+        isAdmin() ||
+        isSupervisor()
+      );
+      allow update: if isAuthenticated() && (
+        (resource.data.userId == request.auth.uid &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clockOut'])) ||
+        isAdmin() ||
+        (isSupervisor() && exists(/databases/$(database)/documents/users/$(resource.data.userId)) && get(/databases/$(database)/documents/users/$(resource.data.userId)).data.supervisorId == request.auth.uid)
+      );
+      allow delete: if isAdmin();
+    }
+
+    // notificationsコレクション
+    // - 自分宛の通知のみ読める
+    // - 作成はログイン済みかつ recipientId が存在するユーザーへのみ可能
+    // - 更新は自分宛の isRead フラグのみ
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+      allow create: if isAuthenticated()
+        && request.resource.data.keys().hasAll(['recipientId', 'title', 'message', 'isRead', 'createdAt'])
+        && exists(/databases/$(database)/documents/users/$(request.resource.data.recipientId));
+      allow update: if isAuthenticated() &&
+        resource.data.recipientId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow delete: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+    }
+
+    // requestsコレクション
+    // - 自分の申請 or 自分が上長の申請 or admin のみ読める
+    // - 作成は自分のuidでのみ可能
+    // - 承認・却下は上長 or admin のみ（status, updatedAt, denialComment を変更可）
+    // - 却下された申請は申請者本人が再編集して再提出可能
+    match /requests/{requestId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.supervisorId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && (
+        // 上長 or admin による承認・却下
+        (
+          (resource.data.supervisorId == request.auth.uid || isAdmin())
+          && resource.data.status == 'pending'
+          && (request.resource.data.status == 'approved' || request.resource.data.status == 'denied')
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'denialComment'])
+        ) ||
+        // 申請者本人による却下済み申請の再編集・再提出
+        (
+          resource.data.userId == request.auth.uid
+          && resource.data.status == 'denied'
+          && request.resource.data.status == 'pending'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['requestedTime', 'reason', 'status', 'denialComment', 'updatedAt'])
+        )
+      );
+      allow delete: if isAdmin();
+    }
+  }
+}
