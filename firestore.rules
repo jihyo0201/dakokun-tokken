@@ -72,6 +72,15 @@ service cloud.firestore {
       allow delete: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
     }
 
+    // settingsコレクション（会社設定）
+    // - 全ログインユーザーが読める
+    // - admin のみ作成・更新可能
+    match /settings/{settingId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
     // requestsコレクション
     // - 自分の申請 or 自分が上長の申請 or admin のみ読める
     // - 作成は自分のuidでのみ可能

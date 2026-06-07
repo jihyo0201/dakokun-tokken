@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval } from '../firebase/attendance';
+import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, updateCompanySettings } from '../firebase/attendance';
 import { getAllUsers, updateUserRole, updateUserSupervisor } from '../firebase/auth';
 import dayjs from 'dayjs';
 
@@ -139,9 +139,35 @@ function getWorkHours(clockIn: any, clockOut: any): number {
   return (end - start) / (1000 * 60 * 60);
 }
 
-function exportMonthlyCSV(records: any[], yearMonth: string) {
-  const [year, month] = yearMonth.split('-');
-  const filtered = records.filter(r => r.date?.startsWith(yearMonth));
+// 締め日に基づく期間を計算する（例: 10日締め → 前月11日〜当月10日）
+function getClosingPeriod(yearMonth: string, closingDay: number): { start: string; end: string; label: string } {
+  const [year, month] = yearMonth.split('-').map(Number);
+
+  if (closingDay >= 28) {
+    // 末日締め扱い
+    const start = `${year}-${String(month).padStart(2, '0')}-01`;
+    const lastDay = new Date(year, month, 0).getDate();
+    const end = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    return { start, end, label: `${year}年${month}月分（${month}/1〜${month}/${lastDay}）` };
+  }
+
+  // 前月の(closingDay+1)日 〜 当月のclosingDay日
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevYear = month === 1 ? year - 1 : year;
+  const startDay = closingDay + 1;
+  const start = `${prevYear}-${String(prevMonth).padStart(2, '0')}-${String(startDay).padStart(2, '0')}`;
+  const end = `${year}-${String(month).padStart(2, '0')}-${String(closingDay).padStart(2, '0')}`;
+  return { start, end, label: `${year}年${month}月分（${prevMonth}/${startDay}〜${month}/${closingDay}）` };
+}
+
+function filterByClosingPeriod(records: any[], yearMonth: string, closingDay: number): any[] {
+  const { start, end } = getClosingPeriod(yearMonth, closingDay);
+  return records.filter(r => r.date >= start && r.date <= end);
+}
+
+function exportMonthlyCSV(records: any[], yearMonth: string, closingDay: number) {
+  const { label } = getClosingPeriod(yearMonth, closingDay);
+  const filtered = filterByClosingPeriod(records, yearMonth, closingDay);
 
   // 社員ごとに集計
   const summaryMap: Record<string, { userName: string; totalHours: number; days: number }> = {};
@@ -155,7 +181,7 @@ function exportMonthlyCSV(records: any[], yearMonth: string) {
     if (hours > 0) summaryMap[key].days += 1;
   });
 
-  // 明細シート
+  // 明細
   const detailHeaders = ['日付', '社員名', '出勤', '退勤', '労働時間(h)'];
   const detailRows = filtered
     .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || '') || (a.userName || '').localeCompare(b.userName || ''))
@@ -167,14 +193,16 @@ function exportMonthlyCSV(records: any[], yearMonth: string) {
       getWorkHours(r.clockIn, r.clockOut).toFixed(2),
     ]);
 
-  // 集計セクション
+  // 集計
   const summaryHeaders = ['社員名', '出勤日数', '合計労働時間(h)'];
   const summaryRows = Object.values(summaryMap)
     .sort((a, b) => a.userName.localeCompare(b.userName))
     .map(s => [s.userName, String(s.days), s.totalHours.toFixed(2)]);
 
+  const [year, month] = yearMonth.split('-');
   const lines: string[] = [];
-  lines.push(`${year}年${month}月 月次勤怠レポート`);
+  lines.push(label);
+  lines.push(`締め日: ${closingDay}日`);
   lines.push('');
   lines.push('【月間集計】');
   lines.push(summaryHeaders.map(escapeCSVField).join(','));
@@ -188,7 +216,7 @@ function exportMonthlyCSV(records: any[], yearMonth: string) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `勤怠レポート_${year}年${month}月.csv`;
+  link.download = `勤怠レポート_${year}年${month}月_${closingDay}日締め.csv`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -217,11 +245,21 @@ const DashboardPage: React.FC = () => {
   const [requestSuccess, setRequestSuccess] = useState(false);
   const [requestError, setRequestError] = useState('');
   const [selectedMonth, setSelectedMonth] = useState(() => dayjs().format('YYYY-MM'));
+  const [closingDay, setClosingDay] = useState(10);
+  const [closingDayInput, setClosingDayInput] = useState('10');
+  const [closingDaySaving, setClosingDaySaving] = useState(false);
+  const [closingDayMessage, setClosingDayMessage] = useState('');
 
   useEffect(() => {
     if (!user) return;
     // 全ロール共通: 自分の申請履歴
     getRequestsByUser(user.uid).then(setMyRequests);
+
+    // 締め日設定を取得
+    getCompanySettings().then(s => {
+      setClosingDay(s.closingDay || 10);
+      setClosingDayInput(String(s.closingDay || 10));
+    });
 
     if (user.role === 'admin') {
       getAllAttendances().then(setAttendances);
@@ -523,10 +561,13 @@ const DashboardPage: React.FC = () => {
                style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 14 }}
              />
              <button
-               onClick={() => exportMonthlyCSV(attendances, selectedMonth)}
+               onClick={() => exportMonthlyCSV(attendances, selectedMonth, closingDay)}
                style={{ background: '#2563eb', color: '#fff', fontWeight: 'bold', border: 'none', borderRadius: 8, padding: '8px 16px', fontSize: 14, cursor: 'pointer', boxShadow: '0 1px 4px #0001', whiteSpace: 'nowrap' }}
              >月次CSV出力</button>
            </div>
+         </div>
+         <div style={{ background: '#f8fafc', borderRadius: 8, padding: '8px 14px', marginBottom: 12, fontSize: 13, color: '#555' }}>
+           {getClosingPeriod(selectedMonth, closingDay).label}（{closingDay}日締め）
          </div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15, minWidth: 600 }}>
@@ -540,11 +581,10 @@ const DashboardPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {attendances.filter(a => a.date?.startsWith(selectedMonth)).length === 0 ? (
-                  <tr><td colSpan={5} style={{ padding: 16, color: '#888', textAlign: 'center' }}>該当月のデータがありません</td></tr>
+                {filterByClosingPeriod(attendances, selectedMonth, closingDay).length === 0 ? (
+                  <tr><td colSpan={5} style={{ padding: 16, color: '#888', textAlign: 'center' }}>該当期間のデータがありません</td></tr>
                 ) : (
-                  attendances
-                    .filter(a => a.date?.startsWith(selectedMonth))
+                  filterByClosingPeriod(attendances, selectedMonth, closingDay)
                     .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''))
                     .map(a => (
                     <tr key={a.id}>
@@ -630,6 +670,60 @@ const DashboardPage: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+      {/* 管理者用: 締め日設定 */}
+      {user?.role === 'admin' && (
+        <div style={{ maxWidth: 900, margin: '24px auto 0', background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px #0001', padding: 24 }}>
+          <h2 style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 18, color: '#222' }}>締め日設定</h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <label style={{ fontSize: 15, fontWeight: 500 }}>
+              毎月
+              <select
+                value={closingDayInput}
+                onChange={e => setClosingDayInput(e.target.value)}
+                style={{ margin: '0 8px', padding: '6px 10px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 15 }}
+              >
+                {Array.from({ length: 28 }, (_, i) => i + 1).map(d => (
+                  <option key={d} value={String(d)}>{d}</option>
+                ))}
+              </select>
+              日締め
+            </label>
+            <button
+              disabled={closingDaySaving || Number(closingDayInput) === closingDay}
+              onClick={async () => {
+                setClosingDaySaving(true);
+                setClosingDayMessage('');
+                try {
+                  const newDay = Number(closingDayInput);
+                  await updateCompanySettings({ closingDay: newDay });
+                  setClosingDay(newDay);
+                  setClosingDayMessage('保存しました');
+                } catch {
+                  setClosingDayMessage('保存に失敗しました');
+                } finally {
+                  setClosingDaySaving(false);
+                  setTimeout(() => setClosingDayMessage(''), 3000);
+                }
+              }}
+              style={{
+                background: Number(closingDayInput) === closingDay ? '#d1d5db' : '#2563eb',
+                color: '#fff', fontWeight: 'bold', border: 'none', borderRadius: 8,
+                padding: '8px 20px', fontSize: 14, cursor: Number(closingDayInput) === closingDay ? 'default' : 'pointer',
+              }}
+            >
+              {closingDaySaving ? '保存中...' : '保存'}
+            </button>
+            {closingDayMessage && (
+              <span style={{ fontSize: 14, color: closingDayMessage === '保存しました' ? '#059669' : '#dc2626', fontWeight: 500 }}>
+                {closingDayMessage}
+              </span>
+            )}
+          </div>
+          <p style={{ fontSize: 13, color: '#888', marginTop: 10 }}>
+            例: 10日締め → 前月11日〜当月10日が1ヶ月分の集計期間になります
+          </p>
         </div>
       )}
       {/* 上司用: 部下の勤怠履歴 */}

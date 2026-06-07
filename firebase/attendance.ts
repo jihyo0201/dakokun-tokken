@@ -1,6 +1,19 @@
 import { db } from './firebase';
-import { collection, addDoc, Timestamp, query, where, getDocs, updateDoc, doc, orderBy, Query, DocumentData } from 'firebase/firestore';
+import { collection, addDoc, Timestamp, query, where, getDocs, updateDoc, doc, orderBy, getDoc, setDoc } from 'firebase/firestore';
 import { Request } from '../types';
+
+// 会社設定の取得
+export const getCompanySettings = async () => {
+  const docRef = doc(db, 'settings', 'company');
+  const docSnap = await getDoc(docRef);
+  if (docSnap.exists()) return docSnap.data();
+  return { closingDay: 10 }; // デフォルト: 10日締め
+};
+
+// 会社設定の更新（admin用）
+export const updateCompanySettings = async (settings: { closingDay: number }) => {
+  await setDoc(doc(db, 'settings', 'company'), settings, { merge: true });
+};
 
 export const clockIn = async (userId: string, userName: string) => {
   const today = new Date();
