@@ -1,5 +1,5 @@
 import { db } from './firebase';
-import { collection, addDoc, Timestamp, query, where, getDocs, updateDoc, doc, orderBy, getDoc, setDoc } from 'firebase/firestore';
+import { collection, addDoc, Timestamp, query, where, getDocs, updateDoc, doc, orderBy, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 import { Request } from '../types';
 
 // 会社設定の取得
@@ -297,4 +297,9 @@ export const applyOvertimeApproval = async (
       overtime: overtimeAmount,
     });
   }
-}; 
+};
+
+// 勤怠レコードの削除（admin用）
+export const deleteAttendance = async (attendanceId: string) => {
+  await deleteDoc(doc(db, 'attendances', attendanceId));
+};

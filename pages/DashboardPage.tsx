@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, updateCompanySettings, getAttendancesByUser } from '../firebase/attendance';
+import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, updateCompanySettings, getAttendancesByUser, deleteAttendance } from '../firebase/attendance';
 import { getAllUsers, updateUserRole, updateUserSupervisor } from '../firebase/auth';
 import dayjs from 'dayjs';
 
@@ -253,12 +253,15 @@ const DashboardPage: React.FC = () => {
     if (!user) return;
     const today = dayjs().format('YYYY-MM-DD');
     const records = await getAttendancesByUser(user.uid);
-    const todayRecord = records.find((r: any) => r.date === today);
-    if (todayRecord?.clockOut) {
-      setTodayStatus('clocked_out');
-    } else if (todayRecord?.clockIn) {
+    const todayRecords = records.filter((r: any) => r.date === today);
+    // 最新のレコードで判定（複数出勤に対応）
+    const latest = todayRecords[0]; // getAttendancesByUserは日付降順
+    if (!latest) {
+      setTodayStatus('none');
+    } else if (latest.clockIn && !latest.clockOut) {
       setTodayStatus('clocked_in');
     } else {
+      // 退勤済み or レコードなし → 再出勤可能
       setTodayStatus('none');
     }
   };
@@ -610,11 +613,12 @@ const DashboardPage: React.FC = () => {
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>出勤</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>退勤</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>労働時間</th>
+                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700, width: 60 }}>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {filterByClosingPeriod(attendances, selectedMonth, closingDay).length === 0 ? (
-                  <tr><td colSpan={5} style={{ padding: 16, color: '#888', textAlign: 'center' }}>該当期間のデータがありません</td></tr>
+                  <tr><td colSpan={6} style={{ padding: 16, color: '#888', textAlign: 'center' }}>該当期間のデータがありません</td></tr>
                 ) : (
                   filterByClosingPeriod(attendances, selectedMonth, closingDay)
                     .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''))
@@ -625,6 +629,16 @@ const DashboardPage: React.FC = () => {
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockIn?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockOut?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{getWorkDuration(a.clockIn, a.clockOut)}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm(`${a.userName}さんの${a.date}の勤怠記録を削除しますか？`)) return;
+                            await deleteAttendance(a.id);
+                            setAttendances(prev => prev.filter(att => att.id !== a.id));
+                          }}
+                          style={{ background: 'none', border: '1px solid #fca5a5', borderRadius: 4, padding: '2px 8px', fontSize: 12, color: '#dc2626', cursor: 'pointer' }}
+                        >削除</button>
+                      </td>
                     </tr>
                   ))
                 )}
