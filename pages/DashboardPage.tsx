@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, updateCompanySettings } from '../firebase/attendance';
+import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, updateCompanySettings, getAttendancesByUser } from '../firebase/attendance';
 import { getAllUsers, updateUserRole, updateUserSupervisor } from '../firebase/auth';
 import dayjs from 'dayjs';
 
@@ -225,8 +225,7 @@ function exportMonthlyCSV(records: any[], yearMonth: string, closingDay: number)
 const DashboardPage: React.FC = () => {
   const { user, logout } = useAuth();
   const now = useNow();
-  const [clockInTime, setClockInTime] = useState<string | null>(null);
-  const [clockOutTime, setClockOutTime] = useState<string | null>(null);
+  const [todayStatus, setTodayStatus] = useState<'none' | 'clocked_in' | 'clocked_out'>('none');
   const [message, setMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [attendances, setAttendances] = useState<any[]>([]);
@@ -250,8 +249,24 @@ const DashboardPage: React.FC = () => {
   const [closingDaySaving, setClosingDaySaving] = useState(false);
   const [closingDayMessage, setClosingDayMessage] = useState('');
 
+  const loadTodayStatus = async () => {
+    if (!user) return;
+    const today = dayjs().format('YYYY-MM-DD');
+    const records = await getAttendancesByUser(user.uid);
+    const todayRecord = records.find((r: any) => r.date === today);
+    if (todayRecord?.clockOut) {
+      setTodayStatus('clocked_out');
+    } else if (todayRecord?.clockIn) {
+      setTodayStatus('clocked_in');
+    } else {
+      setTodayStatus('none');
+    }
+  };
+
   useEffect(() => {
     if (!user) return;
+    // 今日の打刻状態を取得
+    loadTodayStatus();
     // 全ロール共通: 自分の申請履歴
     getRequestsByUser(user.uid).then(setMyRequests);
 
@@ -349,9 +364,8 @@ const DashboardPage: React.FC = () => {
     setIsLoading(true);
     try {
       await clockIn(user.uid, user.name || user.email || '名無し');
-      const now = new Date().toLocaleTimeString();
-      setClockInTime(now);
-      setMessage('出勤打刻しました！（Firestore保存済み）');
+      setTodayStatus('clocked_in');
+      setMessage('出勤打刻しました！');
     } catch (e) {
       setMessage('出勤打刻に失敗しました');
     } finally {
@@ -364,9 +378,8 @@ const DashboardPage: React.FC = () => {
     setIsLoading(true);
     try {
       await clockOut(user.uid);
-      const now = new Date().toLocaleTimeString();
-      setClockOutTime(now);
-      setMessage('退勤打刻しました！（Firestore保存済み）');
+      setTodayStatus('clocked_out');
+      setMessage('退勤打刻しました！');
     } catch (e) {
       setMessage('退勤打刻に失敗しました');
     } finally {
@@ -414,18 +427,37 @@ const DashboardPage: React.FC = () => {
         <h1 style={{ fontWeight: 'bold', fontSize: 22, marginBottom: 8, textAlign: 'center' }}>タイムレコーダー</h1>
         <div style={clockBoxStyle}>{dayjs(now).format('HH:mm:ss')}</div>
         <div style={dateBoxStyle}>{dayjs(now).format('YYYY年M月D日(ddd)')}</div>
+        {todayStatus !== 'none' && (
+          <div style={{ fontSize: 14, color: todayStatus === 'clocked_in' ? '#059669' : '#6b7280', fontWeight: 600, marginBottom: 4 }}>
+            {todayStatus === 'clocked_in' ? '出勤中' : '退勤済み'}
+          </div>
+        )}
         <div style={recorderButtonRow}>
           <button
             onClick={handleClockIn}
-            disabled={isLoading}
-            style={{ ...recorderButton, background: '#2563eb', color: '#fff', borderTopRightRadius: 0, borderBottomRightRadius: 0, opacity: isLoading ? 0.7 : 1 }}
+            disabled={isLoading || todayStatus !== 'none'}
+            style={{
+              ...recorderButton,
+              background: todayStatus === 'none' ? '#2563eb' : '#e5e7eb',
+              color: todayStatus === 'none' ? '#fff' : '#9ca3af',
+              borderTopRightRadius: 0, borderBottomRightRadius: 0,
+              opacity: isLoading ? 0.7 : 1,
+              cursor: todayStatus !== 'none' ? 'default' : 'pointer',
+            }}
           >
             出勤
           </button>
           <button
             onClick={handleClockOut}
-            disabled={isLoading}
-            style={{ ...recorderButton, background: '#e5e7eb', color: '#6b7280', borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1, opacity: isLoading ? 0.7 : 1 }}
+            disabled={isLoading || todayStatus !== 'clocked_in'}
+            style={{
+              ...recorderButton,
+              background: todayStatus === 'clocked_in' ? '#2563eb' : '#e5e7eb',
+              color: todayStatus === 'clocked_in' ? '#fff' : '#9ca3af',
+              borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1,
+              opacity: isLoading ? 0.7 : 1,
+              cursor: todayStatus !== 'clocked_in' ? 'default' : 'pointer',
+            }}
           >
             退勤
           </button>
