@@ -46,6 +46,20 @@ const ProfilePage: React.FC = () => {
           <div style={{ background: '#f3f4f6', borderRadius: 6, padding: 10, marginTop: 4 }}>{email}</div>
         </div>
         <div style={{ marginBottom: 16 }}>
+          <label style={{ fontWeight: 500 }}>勤務区分</label>
+          <div style={{ background: '#f3f4f6', borderRadius: 6, padding: 10, marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{
+              borderRadius: 6, padding: '2px 10px', fontWeight: 700, fontSize: 13,
+              background: (user as any)?.workScheduleType === 'deemed' ? '#fef9c3' : (user as any)?.workScheduleType === 'managerial' ? '#e0e7ff' : (user as any)?.workScheduleType === 'short_flex' ? '#dbeafe' : '#f0fdf4',
+              color: (user as any)?.workScheduleType === 'deemed' ? '#b45309' : (user as any)?.workScheduleType === 'managerial' ? '#4338ca' : (user as any)?.workScheduleType === 'short_flex' ? '#1d4ed8' : '#15803d',
+            }}>
+              {({ regular: '通常勤務', deemed: 'みなし労働時間制', managerial: '管理監督者', short_flex: '時短勤務+フレックス' } as Record<string, string>)[(user as any)?.workScheduleType || 'regular']}
+            </span>
+            {(user as any)?.workScheduleType === 'deemed' && <span style={{ fontSize: 13, color: '#666' }}>（みなし {(user as any)?.deemedHours ?? 8}h/日）</span>}
+            {(user as any)?.workScheduleType === 'short_flex' && <span style={{ fontSize: 13, color: '#666' }}>（所定 {(user as any)?.prescribedDailyHours ?? 6}h/日）</span>}
+          </div>
+        </div>
+        <div style={{ marginBottom: 16 }}>
           <label style={{ fontWeight: 500 }}>名前</label>
           <input
             type="text"

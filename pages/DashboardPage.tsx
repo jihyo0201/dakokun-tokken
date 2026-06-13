@@ -2,18 +2,23 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, updateCompanySettings, getAttendancesByUser, deleteAttendance } from '../firebase/attendance';
-import { getAllUsers, updateUserRole, updateUserSupervisor } from '../firebase/auth';
+import { getAllUsers, updateUserRole, updateUserSupervisor, updateUserWorkSchedule } from '../firebase/auth';
 import dayjs from 'dayjs';
 
-const getWorkDuration = (clockIn: any, clockOut: any) => {
+// 労基法準拠の休憩控除（6h超→45分、8h超→1時間）
+function applyBreakDeduction(rawHours: number): number {
+  if (rawHours > 8) return rawHours - 1;
+  if (rawHours > 6) return rawHours - 0.75;
+  return rawHours;
+}
+
+const getWorkDuration = (clockIn: any, clockOut: any, scheduleType?: string, deemedHours?: number) => {
   if (!clockIn?.toDate || !clockOut?.toDate) return '';
+  if (scheduleType === 'deemed') return (deemedHours ?? 8).toFixed(2) + ' h';
   const start = clockIn.toDate();
   const end = clockOut.toDate();
-  const diffMs = end - start;
-  let diffH = diffMs / (1000 * 60 * 60);
-  // 8時間以上の勤務は休憩1時間を控除
-  if (diffH >= 8) diffH -= 1;
-  return diffH.toFixed(2) + ' h';
+  const rawH = (end - start) / (1000 * 60 * 60);
+  return applyBreakDeduction(rawH).toFixed(2) + ' h';
 };
 
 const cardStyle: React.CSSProperties = {
@@ -134,13 +139,13 @@ function escapeCSVField(value: string): string {
   return sanitized;
 }
 
-function getWorkHours(clockIn: any, clockOut: any): number {
-  if (!clockIn?.toDate || !clockOut?.toDate) return 0;
+function getWorkHours(clockIn: any, clockOut: any, scheduleType?: string, deemedHours?: number): number {
+  if (!clockIn?.toDate || !clockOut?.toDate) return scheduleType === 'deemed' ? (deemedHours ?? 8) : 0;
+  if (scheduleType === 'deemed') return deemedHours ?? 8;
   const start = clockIn.toDate();
   const end = clockOut.toDate();
   const raw = (end - start) / (1000 * 60 * 60);
-  // 8時間以上の勤務は休憩1時間を控除
-  return raw >= 8 ? raw - 1 : raw;
+  return applyBreakDeduction(raw);
 }
 
 // --- 法定外残業算出ユーティリティ ---
@@ -225,8 +230,16 @@ function getWeekSunday(mondayStr: string): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// 勤務区分の日本語ラベル
+const WORK_SCHEDULE_LABELS: Record<string, string> = {
+  regular: '通常勤務',
+  deemed: 'みなし労働時間制',
+  managerial: '管理監督者',
+  short_flex: '時短勤務+フレックス',
+};
+
 // 法定外残業集計を算出
-function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd: string) {
+function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd: string, usersMap: Record<string, any> = {}) {
   // 社員ごとにグループ化
   const byEmployee: Record<string, { userName: string; records: any[] }> = {};
   records.forEach(r => {
@@ -236,60 +249,78 @@ function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd
   });
 
   const businessDays = getBusinessDays(periodStart, periodEnd);
-  const prescribedMonthlyHours = businessDays * 8;
 
   return Object.entries(byEmployee).map(([userId, { userName, records: recs }]) => {
+    const userInfo = usersMap[userId] || {};
+    const scheduleType = userInfo.workScheduleType || 'regular';
+    const deemedH = userInfo.deemedHours ?? 8;
+    const dailyThreshold = scheduleType === 'short_flex' ? (userInfo.prescribedDailyHours ?? 6) : 8;
+    const weeklyThreshold = dailyThreshold * 5;
+    const prescribedMonthlyHours = businessDays * dailyThreshold;
+    const isExempt = scheduleType === 'deemed' || scheduleType === 'managerial';
+
     // 日ごとの労働時間
     const dailyHours: Record<string, number> = {};
     recs.forEach(r => {
-      const h = getWorkHours(r.clockIn, r.clockOut);
+      const h = getWorkHours(r.clockIn, r.clockOut, scheduleType, deemedH);
       dailyHours[r.date] = (dailyHours[r.date] || 0) + h;
     });
 
-    // 日の法定外: 各日8h超過分の合計
+    // 残業対象外の場合はスキップ
     let dailyOvertime = 0;
-    Object.values(dailyHours).forEach(h => {
-      if (h > 8) dailyOvertime += h - 8;
-    });
-
-    // 週ごとの集計
-    const weeklyHours: Record<string, number> = {};
-    Object.entries(dailyHours).forEach(([date, h]) => {
-      const week = getWeekMonday(date);
-      weeklyHours[week] = (weeklyHours[week] || 0) + h;
-    });
-
-    // 週の法定外: 各週40h超過分の合計（日の法定外と重複しない分のみ）
     let weeklyOvertime = 0;
-    Object.entries(weeklyHours).forEach(([week, totalH]) => {
-      if (totalH > 40) {
-        // この週の日別超過分を算出
-        let weekDailyOT = 0;
-        Object.entries(dailyHours).forEach(([date, dh]) => {
-          if (getWeekMonday(date) === week && dh > 8) weekDailyOT += dh - 8;
-        });
-        const weekOT = totalH - 40 - weekDailyOT;
-        if (weekOT > 0) weeklyOvertime += weekOT;
-      }
-    });
+    let monthlyOvertime = 0;
+    const weeklyHours: Record<string, number> = {};
 
-    // 月の総労働時間
+    if (!isExempt) {
+      // 日の法定外
+      Object.values(dailyHours).forEach(h => {
+        if (h > dailyThreshold) dailyOvertime += h - dailyThreshold;
+      });
+
+      // 週ごとの集計
+      Object.entries(dailyHours).forEach(([date, h]) => {
+        const week = getWeekMonday(date);
+        weeklyHours[week] = (weeklyHours[week] || 0) + h;
+      });
+
+      // 週の法定外（日の法定外と重複しない分のみ）
+      Object.entries(weeklyHours).forEach(([week, totalH]) => {
+        if (totalH > weeklyThreshold) {
+          let weekDailyOT = 0;
+          Object.entries(dailyHours).forEach(([date, dh]) => {
+            if (getWeekMonday(date) === week && dh > dailyThreshold) weekDailyOT += dh - dailyThreshold;
+          });
+          const weekOT = totalH - weeklyThreshold - weekDailyOT;
+          if (weekOT > 0) weeklyOvertime += weekOT;
+        }
+      });
+
+      // 月の法定外
+      const totalH = Object.values(dailyHours).reduce((s, h) => s + h, 0);
+      monthlyOvertime = Math.max(0, totalH - prescribedMonthlyHours);
+    } else {
+      // 対象外でも週別表示用に集計
+      Object.entries(dailyHours).forEach(([date, h]) => {
+        const week = getWeekMonday(date);
+        weeklyHours[week] = (weeklyHours[week] || 0) + h;
+      });
+    }
+
     const totalHours = Object.values(dailyHours).reduce((s, h) => s + h, 0);
-    // 月の法定外
-    const monthlyOvertime = Math.max(0, totalHours - prescribedMonthlyHours);
 
-    // 週別明細
     const weekDetails = Object.entries(weeklyHours)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([monday, h]) => ({
         week: `${monday.slice(5)} 〜 ${getWeekSunday(monday).slice(5)}`,
         hours: h,
-        overtime: Math.max(0, h - 40),
+        overtime: isExempt ? 0 : Math.max(0, h - weeklyThreshold),
       }));
 
     return {
       userId, userName, totalHours, dailyOvertime, weeklyOvertime, monthlyOvertime,
       prescribedMonthlyHours, businessDays, weekDetails,
+      workScheduleType: scheduleType, isOvertimeExempt: isExempt,
     };
   }).sort((a, b) => a.userName.localeCompare(b.userName));
 }
@@ -320,39 +351,46 @@ function filterByClosingPeriod(records: any[], yearMonth: string, closingDay: nu
   return records.filter(r => r.date >= start && r.date <= end);
 }
 
-function exportMonthlyCSV(records: any[], yearMonth: string, closingDay: number) {
+function exportMonthlyCSV(records: any[], yearMonth: string, closingDay: number, usersMap: Record<string, any> = {}) {
   const { label } = getClosingPeriod(yearMonth, closingDay);
   const filtered = filterByClosingPeriod(records, yearMonth, closingDay);
 
   // 社員ごとに集計
-  const summaryMap: Record<string, { userName: string; totalHours: number; days: number }> = {};
+  const summaryMap: Record<string, { userName: string; totalHours: number; days: number; scheduleLabel: string }> = {};
   filtered.forEach(r => {
     const key = r.userId || r.userName;
+    const userInfo = usersMap[key] || {};
+    const scheduleType = userInfo.workScheduleType || 'regular';
     if (!summaryMap[key]) {
-      summaryMap[key] = { userName: r.userName, totalHours: 0, days: 0 };
+      summaryMap[key] = { userName: r.userName, totalHours: 0, days: 0, scheduleLabel: WORK_SCHEDULE_LABELS[scheduleType] || '通常勤務' };
     }
-    const hours = getWorkHours(r.clockIn, r.clockOut);
+    const hours = getWorkHours(r.clockIn, r.clockOut, scheduleType, userInfo.deemedHours);
     summaryMap[key].totalHours += hours;
     if (hours > 0) summaryMap[key].days += 1;
   });
 
   // 明細
-  const detailHeaders = ['日付', '社員名', '出勤', '退勤', '労働時間(h)'];
+  const detailHeaders = ['日付', '社員名', '勤務区分', '出勤', '退勤', '労働時間(h)'];
   const detailRows = filtered
     .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || '') || (a.userName || '').localeCompare(b.userName || ''))
-    .map(r => [
-      r.date,
-      r.userName,
-      r.clockIn?.toDate?.().toLocaleTimeString?.() || '',
-      r.clockOut?.toDate?.().toLocaleTimeString?.() || '',
-      getWorkHours(r.clockIn, r.clockOut).toFixed(2),
-    ]);
+    .map(r => {
+      const userInfo = usersMap[r.userId] || {};
+      const scheduleType = userInfo.workScheduleType || 'regular';
+      return [
+        r.date,
+        r.userName,
+        WORK_SCHEDULE_LABELS[scheduleType] || '通常勤務',
+        r.clockIn?.toDate?.().toLocaleTimeString?.() || '',
+        r.clockOut?.toDate?.().toLocaleTimeString?.() || '',
+        getWorkHours(r.clockIn, r.clockOut, scheduleType, userInfo.deemedHours).toFixed(2),
+      ];
+    });
 
   // 集計
-  const summaryHeaders = ['社員名', '出勤日数', '合計労働時間(h)'];
+  const summaryHeaders = ['社員名', '勤務区分', '出勤日数', '合計労働時間(h)'];
   const summaryRows = Object.values(summaryMap)
     .sort((a, b) => a.userName.localeCompare(b.userName))
-    .map(s => [s.userName, String(s.days), s.totalHours.toFixed(2)]);
+    .map(s => [s.userName, s.scheduleLabel, String(s.days), s.totalHours.toFixed(2)]);
 
   const [year, month] = yearMonth.split('-');
   const lines: string[] = [];
@@ -412,6 +450,11 @@ const DashboardPage: React.FC = () => {
   const [monthAutoSet, setMonthAutoSet] = useState(false);
   const [closingDaySaving, setClosingDaySaving] = useState(false);
   const [closingDayMessage, setClosingDayMessage] = useState('');
+  const [workScheduleUpdateLoading, setWorkScheduleUpdateLoading] = useState<string | null>(null);
+
+  // allUsersからユーザー情報マップを構築（勤務区分参照用）
+  const usersMap: Record<string, any> = {};
+  allUsers.forEach(u => { usersMap[u.id] = u; });
 
   const loadTodayStatus = async () => {
     if (!user) return;
@@ -483,6 +526,18 @@ const DashboardPage: React.FC = () => {
       if (import.meta.env.DEV) console.error('上長更新失敗:', e);
     } finally {
       setSupervisorUpdateLoading(null);
+    }
+  };
+
+  const handleWorkScheduleChange = async (uid: string, scheduleType: string, options?: { deemedHours?: number; prescribedDailyHours?: number }) => {
+    setWorkScheduleUpdateLoading(uid);
+    try {
+      await updateUserWorkSchedule(uid, scheduleType, options);
+      setAllUsers(prev => prev.map(u => u.id === uid ? { ...u, workScheduleType: scheduleType, ...options } : u));
+    } catch (e) {
+      if (import.meta.env.DEV) console.error('勤務区分更新失敗:', e);
+    } finally {
+      setWorkScheduleUpdateLoading(null);
     }
   };
 
@@ -840,7 +895,7 @@ const DashboardPage: React.FC = () => {
                style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 14 }}
              />
              <button
-               onClick={() => exportMonthlyCSV(attendances, selectedMonth, closingDay)}
+               onClick={() => exportMonthlyCSV(attendances, selectedMonth, closingDay, usersMap)}
                style={{ background: '#2563eb', color: '#fff', fontWeight: 'bold', border: 'none', borderRadius: 8, padding: '8px 16px', fontSize: 14, cursor: 'pointer', boxShadow: '0 1px 4px #0001', whiteSpace: 'nowrap' }}
              >月次CSV出力</button>
            </div>
@@ -868,17 +923,21 @@ const DashboardPage: React.FC = () => {
                   filterByClosingPeriod(attendances, selectedMonth, closingDay)
                     .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''))
                     .map(a => {
-                    const hours = getWorkHours(a.clockIn, a.clockOut);
-                    const dailyOT = Math.max(0, hours - 8);
+                    const ui = usersMap[a.userId] || {};
+                    const st = ui.workScheduleType || 'regular';
+                    const isExempt = st === 'deemed' || st === 'managerial';
+                    const dailyThreshold = st === 'short_flex' ? (ui.prescribedDailyHours ?? 6) : 8;
+                    const hours = getWorkHours(a.clockIn, a.clockOut, st, ui.deemedHours);
+                    const dailyOT = isExempt ? 0 : Math.max(0, hours - dailyThreshold);
                     return (
                     <tr key={a.id}>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.date}</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.userName}</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockIn?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockOut?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{getWorkDuration(a.clockIn, a.clockOut)}</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: dailyOT > 0 ? '#dc2626' : '#ccc', fontWeight: dailyOT > 0 ? 700 : 400 }}>
-                        {dailyOT > 0 ? dailyOT.toFixed(2) + ' h' : '-'}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{getWorkDuration(a.clockIn, a.clockOut, st, ui.deemedHours)}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: isExempt ? '#9ca3af' : dailyOT > 0 ? '#dc2626' : '#ccc', fontWeight: dailyOT > 0 ? 700 : 400 }}>
+                        {isExempt ? '対象外' : dailyOT > 0 ? dailyOT.toFixed(2) + ' h' : '-'}
                       </td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                         <button
@@ -903,21 +962,22 @@ const DashboardPage: React.FC = () => {
       {user?.role === 'admin' && (() => {
         const period = getClosingPeriod(selectedMonth, closingDay);
         const filtered = filterByClosingPeriod(attendances, selectedMonth, closingDay);
-        const summary = calculateOvertimeSummary(filtered, period.start, period.end);
+        const summary = calculateOvertimeSummary(filtered, period.start, period.end, usersMap);
         if (summary.length === 0) return null;
         return (
           <div style={{ maxWidth: 900, margin: '24px auto 0', background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px #0001', padding: 24 }}>
             <h2 style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 18, color: '#222' }}>法定外残業集計</h2>
             <div style={{ background: '#fef2f2', borderRadius: 8, padding: '8px 14px', marginBottom: 16, fontSize: 13, color: '#991b1b' }}>
-              {period.label} ／ 所定労働日数: {summary[0]?.businessDays}日 ／ 所定労働時間: {summary[0]?.prescribedMonthlyHours}h
+              {period.label} ／ 所定労働日数: {summary[0]?.businessDays}日
             </div>
             {/* 月間サマリーテーブル */}
             <h3 style={{ fontWeight: 700, fontSize: 16, marginBottom: 10, color: '#333' }}>月間サマリー</h3>
             <div style={{ overflowX: 'auto', marginBottom: 24 }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, minWidth: 600 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, minWidth: 700 }}>
                 <thead>
                   <tr style={{ background: '#fef2f2' }}>
                     <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, textAlign: 'left', fontWeight: 700 }}>社員名</th>
+                    <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700 }}>勤務区分</th>
                     <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700 }}>総労働時間</th>
                     <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700 }}>所定時間</th>
                     <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700, color: '#dc2626' }}>日の法定外合計</th>
@@ -927,18 +987,27 @@ const DashboardPage: React.FC = () => {
                 </thead>
                 <tbody>
                   {summary.map(s => (
-                    <tr key={s.userId}>
+                    <tr key={s.userId} style={{ opacity: s.isOvertimeExempt ? 0.6 : 1 }}>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{s.userName}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        <span style={{
+                          fontSize: 11, borderRadius: 4, padding: '2px 6px', fontWeight: 600,
+                          background: s.isOvertimeExempt ? '#f3f4f6' : s.workScheduleType === 'short_flex' ? '#dbeafe' : '#f0fdf4',
+                          color: s.isOvertimeExempt ? '#6b7280' : s.workScheduleType === 'short_flex' ? '#1d4ed8' : '#15803d',
+                        }}>
+                          {WORK_SCHEDULE_LABELS[s.workScheduleType] || '通常勤務'}
+                        </span>
+                      </td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{s.totalHours.toFixed(2)} h</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{s.prescribedMonthlyHours} h</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.dailyOvertime > 0 ? '#dc2626' : '#888', fontWeight: s.dailyOvertime > 0 ? 700 : 400 }}>
-                        {s.dailyOvertime > 0 ? s.dailyOvertime.toFixed(2) + ' h' : '-'}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.isOvertimeExempt ? '#9ca3af' : s.dailyOvertime > 0 ? '#dc2626' : '#888', fontWeight: s.dailyOvertime > 0 ? 700 : 400 }}>
+                        {s.isOvertimeExempt ? '対象外' : s.dailyOvertime > 0 ? s.dailyOvertime.toFixed(2) + ' h' : '-'}
                       </td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.weeklyOvertime > 0 ? '#dc2626' : '#888', fontWeight: s.weeklyOvertime > 0 ? 700 : 400 }}>
-                        {s.weeklyOvertime > 0 ? s.weeklyOvertime.toFixed(2) + ' h' : '-'}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.isOvertimeExempt ? '#9ca3af' : s.weeklyOvertime > 0 ? '#dc2626' : '#888', fontWeight: s.weeklyOvertime > 0 ? 700 : 400 }}>
+                        {s.isOvertimeExempt ? '対象外' : s.weeklyOvertime > 0 ? s.weeklyOvertime.toFixed(2) + ' h' : '-'}
                       </td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.monthlyOvertime > 0 ? '#dc2626' : '#888', fontWeight: s.monthlyOvertime > 0 ? 700 : 400 }}>
-                        {s.monthlyOvertime > 0 ? s.monthlyOvertime.toFixed(2) + ' h' : '-'}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.isOvertimeExempt ? '#9ca3af' : s.monthlyOvertime > 0 ? '#dc2626' : '#888', fontWeight: s.monthlyOvertime > 0 ? 700 : 400 }}>
+                        {s.isOvertimeExempt ? '対象外' : s.monthlyOvertime > 0 ? s.monthlyOvertime.toFixed(2) + ' h' : '-'}
                       </td>
                     </tr>
                   ))}
@@ -983,7 +1052,7 @@ const DashboardPage: React.FC = () => {
         <div style={{ maxWidth: 900, margin: '24px auto 0', background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px #0001', padding: 24 }}>
           <h2 style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 18, color: '#222' }}>ユーザー管理</h2>
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15, minWidth: 500 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15, minWidth: 700 }}>
               <thead>
                 <tr style={{ background: '#f3f4f6' }}>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>名前</th>
@@ -991,10 +1060,13 @@ const DashboardPage: React.FC = () => {
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>ロール</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>変更</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>上長</th>
+                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>勤務区分</th>
                 </tr>
               </thead>
               <tbody>
-                {allUsers.map(u => (
+                {allUsers.map(u => {
+                  const currentSchedule = u.workScheduleType || 'regular';
+                  return (
                   <tr key={u.id}>
                     <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{u.name}</td>
                     <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, color: '#555' }}>{u.email}</td>
@@ -1042,8 +1114,54 @@ const DashboardPage: React.FC = () => {
                         <span style={{ color: '#aaa', fontSize: 13 }}>-</span>
                       )}
                     </td>
+                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center' }}>
+                        <select
+                          value={currentSchedule}
+                          disabled={workScheduleUpdateLoading === u.id}
+                          onChange={e => {
+                            const newType = e.target.value;
+                            const opts: any = {};
+                            if (newType === 'deemed') opts.deemedHours = u.deemedHours ?? 8;
+                            if (newType === 'short_flex') opts.prescribedDailyHours = u.prescribedDailyHours ?? 6;
+                            handleWorkScheduleChange(u.id, newType, opts);
+                          }}
+                          style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 13, cursor: 'pointer' }}
+                        >
+                          <option value="regular">通常勤務</option>
+                          <option value="deemed">みなし労働時間制</option>
+                          <option value="managerial">管理監督者</option>
+                          <option value="short_flex">時短+フレックス</option>
+                        </select>
+                        {currentSchedule === 'deemed' && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                            <span style={{ color: '#666' }}>みなし:</span>
+                            <input
+                              type="number" min="1" max="12" step="0.5"
+                              value={u.deemedHours ?? 8}
+                              onChange={e => handleWorkScheduleChange(u.id, 'deemed', { deemedHours: Number(e.target.value) })}
+                              style={{ width: 48, padding: '2px 4px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 12, textAlign: 'center' }}
+                            />
+                            <span style={{ color: '#666' }}>h</span>
+                          </div>
+                        )}
+                        {currentSchedule === 'short_flex' && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                            <span style={{ color: '#666' }}>所定:</span>
+                            <input
+                              type="number" min="1" max="8" step="0.5"
+                              value={u.prescribedDailyHours ?? 6}
+                              onChange={e => handleWorkScheduleChange(u.id, 'short_flex', { prescribedDailyHours: Number(e.target.value) })}
+                              style={{ width: 48, padding: '2px 4px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 12, textAlign: 'center' }}
+                            />
+                            <span style={{ color: '#666' }}>h/日</span>
+                          </div>
+                        )}
+                      </div>
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

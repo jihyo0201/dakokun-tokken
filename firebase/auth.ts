@@ -60,3 +60,15 @@ export const updateUserRole = async (uid: string, role: 'admin' | 'supervisor' |
 export const updateUserSupervisor = async (uid: string, supervisorId: string) => {
   await updateDoc(doc(db, 'users', uid), { supervisorId });
 };
+
+// ユーザーの勤務区分を更新（admin 用）
+export const updateUserWorkSchedule = async (
+  uid: string,
+  workScheduleType: string,
+  options?: { deemedHours?: number; prescribedDailyHours?: number }
+) => {
+  const updateData: any = { workScheduleType };
+  if (options?.deemedHours !== undefined) updateData.deemedHours = options.deemedHours;
+  if (options?.prescribedDailyHours !== undefined) updateData.prescribedDailyHours = options.prescribedDailyHours;
+  await updateDoc(doc(db, 'users', uid), updateData);
+};

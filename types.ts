@@ -5,6 +5,13 @@ export enum Role {
   Admin = 'Admin',
 }
 
+export enum WorkScheduleType {
+  Regular = 'regular',           // 通常勤務
+  DeemedHours = 'deemed',        // みなし労働時間制
+  Managerial = 'managerial',     // 管理監督者
+  ShortTimeFlex = 'short_flex',  // 時短勤務+フレックス
+}
+
 export enum RequestType {
   Correction = 'Correction',
   Overtime = 'Overtime',
@@ -22,6 +29,9 @@ export interface User {
   email: string;
   role: Role;
   supervisorId?: string;
+  workScheduleType?: WorkScheduleType;  // デフォルト: regular
+  deemedHours?: number;                 // みなし労働時間制の場合のみなし時間（デフォルト: 8）
+  prescribedDailyHours?: number;        // 時短勤務の場合の所定労働時間（デフォルト: 6）
 }
 
 export interface TimeEntry {
