@@ -254,9 +254,9 @@ function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd
     const userInfo = usersMap[userId] || {};
     const scheduleType = userInfo.workScheduleType || 'regular';
     const deemedH = userInfo.deemedHours ?? 8;
-    const dailyThreshold = scheduleType === 'short_flex' ? (userInfo.prescribedDailyHours ?? 6) : 8;
-    const weeklyThreshold = dailyThreshold * 5;
-    const prescribedMonthlyHours = businessDays * dailyThreshold;
+    const dailyThreshold = 8; // 法定外は一律8h基準
+    const weeklyThreshold = 40; // 法定外は一律40h基準
+    const prescribedMonthlyHours = businessDays * 8;
     const isExempt = scheduleType === 'deemed' || scheduleType === 'managerial';
 
     // 日ごとの労働時間
@@ -926,9 +926,8 @@ const DashboardPage: React.FC = () => {
                     const ui = usersMap[a.userId] || {};
                     const st = ui.workScheduleType || 'regular';
                     const isExempt = st === 'deemed' || st === 'managerial';
-                    const dailyThreshold = st === 'short_flex' ? (ui.prescribedDailyHours ?? 6) : 8;
                     const hours = getWorkHours(a.clockIn, a.clockOut, st, ui.deemedHours);
-                    const dailyOT = isExempt ? 0 : Math.max(0, hours - dailyThreshold);
+                    const dailyOT = isExempt ? 0 : Math.max(0, hours - 8);
                     return (
                     <tr key={a.id}>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.date}</td>
