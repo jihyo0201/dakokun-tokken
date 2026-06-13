@@ -8,7 +8,9 @@ const getWorkDuration = (clockIn: any, clockOut: any) => {
   const start = clockIn.toDate();
   const end = clockOut.toDate();
   const diffMs = end - start;
-  const diffH = diffMs / (1000 * 60 * 60);
+  let diffH = diffMs / (1000 * 60 * 60);
+  // 8時間以上の勤務は休憩1時間を控除
+  if (diffH >= 8) diffH -= 1;
   return diffH.toFixed(2) + ' h';
 };
 
