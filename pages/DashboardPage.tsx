@@ -254,9 +254,11 @@ function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd
     const userInfo = usersMap[userId] || {};
     const scheduleType = userInfo.workScheduleType || 'regular';
     const deemedH = userInfo.deemedHours ?? 8;
+    const dailyPrescribed = scheduleType === 'short_flex' ? (userInfo.prescribedDailyHours ?? 6) : 8;
     const dailyThreshold = 8; // 法定外は一律8h基準
     const weeklyThreshold = 40; // 法定外は一律40h基準
-    const prescribedMonthlyHours = businessDays * 8;
+    const prescribedMonthlyHours = businessDays * dailyPrescribed; // 所定時間は社員の所定時間ベース
+    const legalOvertimeMonthlyThreshold = businessDays * 8; // 法定外判定は8hベース
     const isExempt = scheduleType === 'deemed' || scheduleType === 'managerial';
 
     // 日ごとの労働時間
@@ -298,7 +300,7 @@ function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd
 
       // 月の法定外
       const totalH = Object.values(dailyHours).reduce((s, h) => s + h, 0);
-      monthlyOvertime = Math.max(0, totalH - prescribedMonthlyHours);
+      monthlyOvertime = Math.max(0, totalH - legalOvertimeMonthlyThreshold);
     } else {
       // 対象外でも週別表示用に集計
       Object.entries(dailyHours).forEach(([date, h]) => {
