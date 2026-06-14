@@ -795,6 +795,15 @@ const DashboardPage: React.FC = () => {
             申請承認
           </Link>
         )}
+        <Link to="/suggestions" style={{
+          flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          background: '#fff', borderRadius: 12, boxShadow: '0 2px 8px #0001',
+          padding: '16px 0', fontWeight: 700, fontSize: 16, color: '#7c3aed',
+          textDecoration: 'none', border: '2px solid #ede9fe', transition: 'all 0.2s',
+        }}>
+          <svg width="20" height="20" fill="none" stroke="#7c3aed" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          目安箱
+        </Link>
       </div>
       {/* 申請フォームモーダル */}
       {showRequestModal && (

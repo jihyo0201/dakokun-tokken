@@ -303,3 +303,43 @@ export const applyOvertimeApproval = async (
 export const deleteAttendance = async (attendanceId: string) => {
   await deleteDoc(doc(db, 'attendances', attendanceId));
 };
+
+// --- 目安箱（suggestions）API ---
+
+// 要望を投稿
+export const createSuggestion = async (suggestion: {
+  userId: string;
+  userName: string;
+  body: string;
+  isAnonymous: boolean;
+}) => {
+  const now = Timestamp.now();
+  const docRef = await addDoc(collection(db, 'suggestions'), {
+    ...suggestion,
+    isRead: false,
+    createdAt: now,
+  });
+  return docRef.id;
+};
+
+// 全要望を取得（admin用）
+export const getAllSuggestions = async () => {
+  const snapshot = await getDocs(collection(db, 'suggestions'));
+  const results = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+  results.sort((a: any, b: any) => {
+    const aTime = a.createdAt?.toDate?.()?.getTime?.() ?? 0;
+    const bTime = b.createdAt?.toDate?.()?.getTime?.() ?? 0;
+    return bTime - aTime;
+  });
+  return results;
+};
+
+// 要望を既読にする（admin用）
+export const markSuggestionAsRead = async (suggestionId: string) => {
+  await updateDoc(doc(db, 'suggestions', suggestionId), { isRead: true });
+};
+
+// 要望を削除する（admin用）
+export const deleteSuggestion = async (suggestionId: string) => {
+  await deleteDoc(doc(db, 'suggestions', suggestionId));
+};
