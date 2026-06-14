@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, updateCompanySettings, getAttendancesByUser, deleteAttendance } from '../firebase/attendance';
-import { getAllUsers, updateUserRole, updateUserSupervisor, updateUserWorkSchedule } from '../firebase/auth';
+import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, getAttendancesByUser, deleteAttendance } from '../firebase/attendance';
+import { getAllUsers } from '../firebase/auth';
 import dayjs from 'dayjs';
 
 // 労基法準拠の休憩控除（6h超→45分、8h超→1時間）
@@ -428,8 +428,6 @@ const DashboardPage: React.FC = () => {
   const [requests, setRequests] = useState<any[]>([]);
   const [myRequests, setMyRequests] = useState<any[]>([]);
   const [allUsers, setAllUsers] = useState<any[]>([]);
-  const [roleUpdateLoading, setRoleUpdateLoading] = useState<string | null>(null);
-  const [supervisorUpdateLoading, setSupervisorUpdateLoading] = useState<string | null>(null);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestType, setRequestType] = useState<'打刻修正' | '残業申請'>('打刻修正');
   const [requestDate, setRequestDate] = useState('');
@@ -445,14 +443,19 @@ const DashboardPage: React.FC = () => {
   const [leaveLoading, setLeaveLoading] = useState(false);
   const [leaveSuccess, setLeaveSuccess] = useState(false);
   const [leaveError, setLeaveError] = useState('');
+  // 休日出勤申請用
+  const [showHolidayWorkModal, setShowHolidayWorkModal] = useState(false);
+  const [holidayWorkDate, setHolidayWorkDate] = useState('');
+  const [holidayWorkReason, setHolidayWorkReason] = useState('');
+  const [holidayWorkType, setHolidayWorkType] = useState<'none' | 'substitute' | 'compensatory'>('none');
+  const [substituteDate, setSubstituteDate] = useState('');
+  const [holidayWorkLoading, setHolidayWorkLoading] = useState(false);
+  const [holidayWorkSuccess, setHolidayWorkSuccess] = useState(false);
+  const [holidayWorkError, setHolidayWorkError] = useState('');
   const [selectedMonth, setSelectedMonth] = useState(() => dayjs().format('YYYY-MM'));
   const [closingDay, setClosingDay] = useState(10);
-  const [closingDayInput, setClosingDayInput] = useState('10');
   // 締め日に基づいてselectedMonthを自動設定するフラグ（初回のみ）
   const [monthAutoSet, setMonthAutoSet] = useState(false);
-  const [closingDaySaving, setClosingDaySaving] = useState(false);
-  const [closingDayMessage, setClosingDayMessage] = useState('');
-  const [workScheduleUpdateLoading, setWorkScheduleUpdateLoading] = useState<string | null>(null);
 
   // allUsersからユーザー情報マップを構築（勤務区分参照用）
   const usersMap: Record<string, any> = {};
@@ -486,7 +489,6 @@ const DashboardPage: React.FC = () => {
     getCompanySettings().then(s => {
       const cd = s.closingDay || 10;
       setClosingDay(cd);
-      setClosingDayInput(String(cd));
       // 締め日を過ぎていたら翌月を表示（初回のみ）
       if (!monthAutoSet) {
         const today = dayjs();
@@ -506,42 +508,6 @@ const DashboardPage: React.FC = () => {
       getAttendancesBySubordinates(user.uid).then(setSubordinateAttendances);
     }
   }, [user]);
-
-  const handleRoleChange = async (uid: string, newRole: 'admin' | 'supervisor' | 'employee') => {
-    setRoleUpdateLoading(uid);
-    try {
-      await updateUserRole(uid, newRole);
-      setAllUsers(prev => prev.map(u => u.id === uid ? { ...u, role: newRole } : u));
-    } catch (e) {
-      if (import.meta.env.DEV) console.error('ロール更新失敗:', e);
-    } finally {
-      setRoleUpdateLoading(null);
-    }
-  };
-
-  const handleSupervisorChange = async (uid: string, newSupervisorId: string) => {
-    setSupervisorUpdateLoading(uid);
-    try {
-      await updateUserSupervisor(uid, newSupervisorId);
-      setAllUsers(prev => prev.map(u => u.id === uid ? { ...u, supervisorId: newSupervisorId } : u));
-    } catch (e) {
-      if (import.meta.env.DEV) console.error('上長更新失敗:', e);
-    } finally {
-      setSupervisorUpdateLoading(null);
-    }
-  };
-
-  const handleWorkScheduleChange = async (uid: string, scheduleType: string, options?: { deemedHours?: number; prescribedDailyHours?: number }) => {
-    setWorkScheduleUpdateLoading(uid);
-    try {
-      await updateUserWorkSchedule(uid, scheduleType, options);
-      setAllUsers(prev => prev.map(u => u.id === uid ? { ...u, workScheduleType: scheduleType, ...options } : u));
-    } catch (e) {
-      if (import.meta.env.DEV) console.error('勤務区分更新失敗:', e);
-    } finally {
-      setWorkScheduleUpdateLoading(null);
-    }
-  };
 
   const loadRequests = async () => {
     if (!user) return;
@@ -680,6 +646,41 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  // 休日出勤申請送信処理
+  const handleSubmitHolidayWork = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setHolidayWorkLoading(true);
+    setHolidayWorkError('');
+    try {
+      if (!user) throw new Error('ユーザー情報が取得できません');
+      if (!holidayWorkDate || !holidayWorkReason) throw new Error('すべての項目を入力してください');
+      if ((holidayWorkType === 'substitute' || holidayWorkType === 'compensatory') && !substituteDate) throw new Error('振替先/代休取得日を入力してください');
+      if (holidayWorkReason.length > 500) throw new Error('理由は500文字以内で入力してください');
+
+      // Determine request type
+      let type = '休日出勤申請';
+      if (holidayWorkType === 'substitute') type = '振替休日申請';
+      else if (holidayWorkType === 'compensatory') type = '代休申請';
+
+      await createRequest({
+        userId: user.uid,
+        userName: user.name || user.email || '名無し',
+        supervisorId: user.supervisorId || '',
+        type,
+        date: holidayWorkDate,
+        requestedTime: holidayWorkType !== 'none' ? substituteDate : '終日',
+        reason: holidayWorkReason,
+      });
+      setHolidayWorkSuccess(true);
+      setHolidayWorkDate(''); setHolidayWorkReason(''); setHolidayWorkType('none'); setSubstituteDate('');
+      getRequestsByUser(user.uid).then(setMyRequests);
+    } catch (e: any) {
+      setHolidayWorkError(e.message || '申請に失敗しました');
+    } finally {
+      setHolidayWorkLoading(false);
+    }
+  };
+
   return (
     <>
       <style>{responsiveStyle}</style>
@@ -759,6 +760,17 @@ const DashboardPage: React.FC = () => {
           <svg width="20" height="20" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>
           有休申請
         </button>
+        <button
+          style={{
+            flex: 1, maxWidth: 360,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: '2px solid #f97316', background: '#fff', color: '#c2410c', fontWeight: 'bold', fontSize: 16, borderRadius: 8, padding: '10px 0', cursor: 'pointer', transition: 'background 0.2s', gap: 8
+          }}
+          onClick={() => { setHolidayWorkSuccess(false); setHolidayWorkError(''); setShowHolidayWorkModal(true); }}
+        >
+          <svg width="20" height="20" fill="none" stroke="#f97316" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M12 14v4"/><path d="M10 16h4"/></svg>
+          休日出勤申請
+        </button>
       </div>
       {/* 履歴ページへのナビゲーション */}
       <div style={{
@@ -793,6 +805,17 @@ const DashboardPage: React.FC = () => {
           }}>
             <svg width="20" height="20" fill="none" stroke="#dc2626" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
             申請承認
+          </Link>
+        )}
+        {user?.role === 'admin' && (
+          <Link to="/settings" style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            background: '#fff', borderRadius: 12, boxShadow: '0 2px 8px #0001',
+            padding: '16px 0', fontWeight: 700, fontSize: 16, color: '#6b7280',
+            textDecoration: 'none', border: '2px solid #e5e7eb', transition: 'all 0.2s',
+          }}>
+            <svg width="20" height="20" fill="none" stroke="#6b7280" strokeWidth="2" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            設定
           </Link>
         )}
       </div>
@@ -871,6 +894,53 @@ const DashboardPage: React.FC = () => {
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                   <button type="button" onClick={() => setShowLeaveModal(false)} style={{ padding: '8px 20px', borderRadius: 8, background: '#eee', color: '#333', border: 'none', fontWeight: 'bold', fontSize: 15, cursor: 'pointer' }}>キャンセル</button>
                   <button type="submit" disabled={leaveLoading} style={{ padding: '8px 24px', borderRadius: 8, background: '#22c55e', color: '#fff', border: 'none', fontWeight: 'bold', fontSize: 15, cursor: 'pointer', opacity: leaveLoading ? 0.7 : 1 }}>{leaveLoading ? '送信中...' : '申請する'}</button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+      {/* 休日出勤申請フォームモーダル */}
+      {showHolidayWorkModal && (
+        <div style={modalOverlayStyle}>
+          <div style={modalCardStyle}>
+            <h2 style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 16 }}>休日出勤申請</h2>
+            {holidayWorkSuccess ? (
+              <div style={{ color: '#c2410c', fontWeight: 'bold', textAlign: 'center', marginBottom: 16 }}>
+                申請が送信されました！
+                <br />
+                <button style={{ marginTop: 16, padding: '8px 24px', borderRadius: 8, background: '#f97316', color: '#fff', border: 'none', fontWeight: 'bold', fontSize: 15, cursor: 'pointer' }} onClick={() => { setShowHolidayWorkModal(false); setHolidayWorkSuccess(false); }}>閉じる</button>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmitHolidayWork}>
+                <div style={{ marginBottom: 12 }}>
+                  <label>出勤日：<input type="date" value={holidayWorkDate} onChange={e => setHolidayWorkDate(e.target.value)} style={{ marginLeft: 8, padding: 4, borderRadius: 4, border: '1px solid #ccc' }} required /></label>
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label>振休・代休：
+                    <select value={holidayWorkType} onChange={e => setHolidayWorkType(e.target.value as any)} style={{ marginLeft: 8, padding: '4px 8px', borderRadius: 4, border: '1px solid #ccc', fontSize: 14 }}>
+                      <option value="none">なし（休日出勤のみ）</option>
+                      <option value="substitute">振替休日を取得する</option>
+                      <option value="compensatory">代休を取得する</option>
+                    </select>
+                  </label>
+                </div>
+                {(holidayWorkType === 'substitute' || holidayWorkType === 'compensatory') && (
+                  <div style={{ marginBottom: 12 }}>
+                    <label>{holidayWorkType === 'substitute' ? '振替先の日付' : '代休取得日'}：
+                      <input type="date" value={substituteDate} onChange={e => setSubstituteDate(e.target.value)} style={{ marginLeft: 8, padding: 4, borderRadius: 4, border: '1px solid #ccc' }} required />
+                    </label>
+                  </div>
+                )}
+                <div style={{ marginBottom: 12 }}>
+                  <label>理由：<br />
+                    <textarea value={holidayWorkReason} onChange={e => setHolidayWorkReason(e.target.value)} style={{ width: '100%', minHeight: 60, borderRadius: 4, border: '1px solid #ccc', padding: 4 }} required />
+                  </label>
+                </div>
+                {holidayWorkError && <div style={{ color: 'red', marginBottom: 8 }}>{holidayWorkError}</div>}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                  <button type="button" onClick={() => setShowHolidayWorkModal(false)} style={{ padding: '8px 20px', borderRadius: 8, background: '#eee', color: '#333', border: 'none', fontWeight: 'bold', fontSize: 15, cursor: 'pointer' }}>キャンセル</button>
+                  <button type="submit" disabled={holidayWorkLoading} style={{ padding: '8px 24px', borderRadius: 8, background: '#f97316', color: '#fff', border: 'none', fontWeight: 'bold', fontSize: 15, cursor: 'pointer', opacity: holidayWorkLoading ? 0.7 : 1 }}>{holidayWorkLoading ? '送信中...' : '申請する'}</button>
                 </div>
               </form>
             )}
@@ -1048,180 +1118,6 @@ const DashboardPage: React.FC = () => {
           </div>
         );
       })()}
-      {/* 管理者用: ユーザー管理 */}
-      {user?.role === 'admin' && (
-        <div style={{ maxWidth: 900, margin: '24px auto 0', background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px #0001', padding: 24 }}>
-          <h2 style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 18, color: '#222' }}>ユーザー管理</h2>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15, minWidth: 700 }}>
-              <thead>
-                <tr style={{ background: '#f3f4f6' }}>
-                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>名前</th>
-                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>メール</th>
-                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>ロール</th>
-                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>変更</th>
-                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>上長</th>
-                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>勤務区分</th>
-                </tr>
-              </thead>
-              <tbody>
-                {allUsers.map(u => {
-                  const currentSchedule = u.workScheduleType || 'regular';
-                  return (
-                  <tr key={u.id}>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{u.name}</td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, color: '#555' }}>{u.email}</td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
-                      <span style={{
-                        background: u.role === 'admin' ? '#dbeafe' : u.role === 'supervisor' ? '#fef9c3' : '#f0fdf4',
-                        color: u.role === 'admin' ? '#1d4ed8' : u.role === 'supervisor' ? '#b45309' : '#15803d',
-                        borderRadius: 6, padding: '2px 10px', fontWeight: 700, fontSize: 13,
-                      }}>
-                        {u.role}
-                      </span>
-                    </td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
-                      {u.id === user.uid ? (
-                        <span style={{ color: '#aaa', fontSize: 13 }}>（自分）</span>
-                      ) : (
-                        <select
-                          value={u.role}
-                          disabled={roleUpdateLoading === u.id}
-                          onChange={e => handleRoleChange(u.id, e.target.value as 'admin' | 'supervisor' | 'employee')}
-                          style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 14, cursor: 'pointer' }}
-                        >
-                          <option value="employee">employee</option>
-                          <option value="supervisor">supervisor</option>
-                          <option value="admin">admin</option>
-                        </select>
-                      )}
-                    </td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
-                      {u.role === 'employee' ? (
-                        <select
-                          value={u.supervisorId || ''}
-                          disabled={supervisorUpdateLoading === u.id}
-                          onChange={e => handleSupervisorChange(u.id, e.target.value)}
-                          style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 14, cursor: 'pointer' }}
-                        >
-                          <option value="">未設定</option>
-                          {allUsers
-                            .filter(s => s.role === 'supervisor' || s.role === 'admin')
-                            .map(s => (
-                              <option key={s.id} value={s.id}>{s.name}</option>
-                            ))}
-                        </select>
-                      ) : (
-                        <span style={{ color: '#aaa', fontSize: 13 }}>-</span>
-                      )}
-                    </td>
-                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center' }}>
-                        <select
-                          value={currentSchedule}
-                          disabled={workScheduleUpdateLoading === u.id}
-                          onChange={e => {
-                            const newType = e.target.value;
-                            const opts: any = {};
-                            if (newType === 'deemed') opts.deemedHours = u.deemedHours ?? 8;
-                            if (newType === 'short_flex') opts.prescribedDailyHours = u.prescribedDailyHours ?? 6;
-                            handleWorkScheduleChange(u.id, newType, opts);
-                          }}
-                          style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 13, cursor: 'pointer' }}
-                        >
-                          <option value="regular">通常勤務</option>
-                          <option value="deemed">みなし労働時間制</option>
-                          <option value="managerial">管理監督者</option>
-                          <option value="short_flex">時短+フレックス</option>
-                        </select>
-                        {currentSchedule === 'deemed' && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
-                            <span style={{ color: '#666' }}>みなし:</span>
-                            <input
-                              type="number" min="1" max="12" step="0.5"
-                              value={u.deemedHours ?? 8}
-                              onChange={e => handleWorkScheduleChange(u.id, 'deemed', { deemedHours: Number(e.target.value) })}
-                              style={{ width: 48, padding: '2px 4px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 12, textAlign: 'center' }}
-                            />
-                            <span style={{ color: '#666' }}>h</span>
-                          </div>
-                        )}
-                        {currentSchedule === 'short_flex' && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
-                            <span style={{ color: '#666' }}>所定:</span>
-                            <input
-                              type="number" min="1" max="8" step="0.5"
-                              value={u.prescribedDailyHours ?? 6}
-                              onChange={e => handleWorkScheduleChange(u.id, 'short_flex', { prescribedDailyHours: Number(e.target.value) })}
-                              style={{ width: 48, padding: '2px 4px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 12, textAlign: 'center' }}
-                            />
-                            <span style={{ color: '#666' }}>h/日</span>
-                          </div>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-      {/* 管理者用: 締め日設定 */}
-      {user?.role === 'admin' && (
-        <div style={{ maxWidth: 900, margin: '24px auto 0', background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px #0001', padding: 24 }}>
-          <h2 style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 18, color: '#222' }}>締め日設定</h2>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <label style={{ fontSize: 15, fontWeight: 500 }}>
-              毎月
-              <select
-                value={closingDayInput}
-                onChange={e => setClosingDayInput(e.target.value)}
-                style={{ margin: '0 8px', padding: '6px 10px', borderRadius: 6, border: '1px solid #d1d5db', fontSize: 15 }}
-              >
-                {Array.from({ length: 28 }, (_, i) => i + 1).map(d => (
-                  <option key={d} value={String(d)}>{d}</option>
-                ))}
-              </select>
-              日締め
-            </label>
-            <button
-              disabled={closingDaySaving || Number(closingDayInput) === closingDay}
-              onClick={async () => {
-                setClosingDaySaving(true);
-                setClosingDayMessage('');
-                try {
-                  const newDay = Number(closingDayInput);
-                  await updateCompanySettings({ closingDay: newDay });
-                  setClosingDay(newDay);
-                  setClosingDayMessage('保存しました');
-                } catch {
-                  setClosingDayMessage('保存に失敗しました');
-                } finally {
-                  setClosingDaySaving(false);
-                  setTimeout(() => setClosingDayMessage(''), 3000);
-                }
-              }}
-              style={{
-                background: Number(closingDayInput) === closingDay ? '#d1d5db' : '#2563eb',
-                color: '#fff', fontWeight: 'bold', border: 'none', borderRadius: 8,
-                padding: '8px 20px', fontSize: 14, cursor: Number(closingDayInput) === closingDay ? 'default' : 'pointer',
-              }}
-            >
-              {closingDaySaving ? '保存中...' : '保存'}
-            </button>
-            {closingDayMessage && (
-              <span style={{ fontSize: 14, color: closingDayMessage === '保存しました' ? '#059669' : '#dc2626', fontWeight: 500 }}>
-                {closingDayMessage}
-              </span>
-            )}
-          </div>
-          <p style={{ fontSize: 13, color: '#888', marginTop: 10 }}>
-            例: 10日締め → 前月11日〜当月10日が1ヶ月分の集計期間になります
-          </p>
-        </div>
-      )}
       {/* 上司用: 部下の勤怠履歴 */}
       {user?.role === 'supervisor' && (
         <div style={{ maxWidth: 900, margin: '24px auto 0', background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px #0001', padding: 24 }}>

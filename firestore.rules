@@ -81,6 +81,17 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // suggestionsコレクション（目安箱）
+    // - admin は全件読める
+    // - ログインユーザーは誰でも作成可能
+    // - admin のみ更新（既読）・削除可能
+    match /suggestions/{suggestionId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
     // requestsコレクション
     // - 自分の申請 or 自分が上長の申請 or admin のみ読める
     // - 作成は自分のuidでのみ可能

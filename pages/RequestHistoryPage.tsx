@@ -33,11 +33,13 @@ function escapeCSVField(value: string): string {
   return sanitized;
 }
 
-function exportRequestsCSV(records: any[], type: 'clock' | 'overtime' | 'leave', userName: string) {
+function exportRequestsCSV(records: any[], type: 'clock' | 'overtime' | 'leave' | 'holiday', userName: string) {
   const headers = type === 'clock'
     ? ['ユーザー名', '申請日付', '対象', '修正時刻', '理由', 'ステータス', '却下コメント']
     : type === 'leave'
     ? ['ユーザー名', '取得日', '理由', 'ステータス', '却下コメント']
+    : type === 'holiday'
+    ? ['ユーザー名', '種別', '出勤日', '振替先/代休日', '理由', 'ステータス', '却下コメント']
     : ['ユーザー名', '申請日付', '残業時間', '理由', 'ステータス', '却下コメント'];
   const rows = records.map(r => {
     const status = r.status === 'pending' ? '保留中' : r.status === 'approved' ? '承認済み' : '却下済み';
@@ -47,12 +49,15 @@ function exportRequestsCSV(records: any[], type: 'clock' | 'overtime' | 'leave',
     if (type === 'leave') {
       return [userName, r.date, r.reason, status, r.denialComment || ''];
     }
+    if (type === 'holiday') {
+      return [userName, r.type, r.date, r.requestedTime !== '終日' ? r.requestedTime : '-', r.reason, status, r.denialComment || ''];
+    }
     return [userName, r.date, r.requestedTime, r.reason, status, r.denialComment || ''];
   });
   const csvContent = '\uFEFF' + headers.map(escapeCSVField).join(',') + '\n' + rows.map(e => e.map(escapeCSVField).join(',')).join('\n');
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
-  const label = type === 'clock' ? '打刻修正申請' : type === 'leave' ? '有休申請' : '残業申請';
+  const label = type === 'clock' ? '打刻修正申請' : type === 'leave' ? '有休申請' : type === 'holiday' ? '休日出勤申請' : '残業申請';
   link.href = URL.createObjectURL(blob);
   link.download = `${label}_${new Date().toISOString().slice(0, 10)}.csv`;
   document.body.appendChild(link);
@@ -64,7 +69,7 @@ const RequestHistoryPage: React.FC = () => {
   const { user } = useAuth();
   const [requests, setRequests] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [tab, setTab] = useState<'clock' | 'overtime' | 'leave'>('clock');
+  const [tab, setTab] = useState<'clock' | 'overtime' | 'leave' | 'holiday'>('clock');
 
   // 再編集モーダル用
   const [showEditModal, setShowEditModal] = useState(false);
@@ -132,7 +137,8 @@ const RequestHistoryPage: React.FC = () => {
   const clockRequests = requests.filter(r => r.type?.includes('打刻修正'));
   const overtimeRequests = requests.filter(r => r.type === '残業申請');
   const leaveRequests = requests.filter(r => r.type === '有休申請');
-  const filtered = tab === 'clock' ? clockRequests : tab === 'overtime' ? overtimeRequests : leaveRequests;
+  const holidayRequests = requests.filter(r => r.type === '休日出勤申請' || r.type === '振替休日申請' || r.type === '代休申請');
+  const filtered = tab === 'clock' ? clockRequests : tab === 'overtime' ? overtimeRequests : tab === 'leave' ? leaveRequests : holidayRequests;
 
   const renderTable = (items: any[]) => {
     if (items.length === 0) {
@@ -143,9 +149,11 @@ const RequestHistoryPage: React.FC = () => {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15, minWidth: 700 }}>
           <thead>
             <tr style={{ background: '#f3f4f6' }}>
-              <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>{tab === 'leave' ? '取得日' : '申請日付'}</th>
+              {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>種別</th>}
+              <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>{tab === 'leave' ? '取得日' : tab === 'holiday' ? '出勤日' : '申請日付'}</th>
+              {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>振替先/代休日</th>}
               {tab === 'clock' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>対象</th>}
-              {tab !== 'leave' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
+              {tab !== 'leave' && tab !== 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>理由</th>
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>ステータス</th>
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>却下コメント</th>
@@ -155,13 +163,19 @@ const RequestHistoryPage: React.FC = () => {
           <tbody>
             {items.map(r => (
               <tr key={r.id}>
+                {tab === 'holiday' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.type}</td>
+                )}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{r.date}</td>
+                {tab === 'holiday' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime !== '終日' ? r.requestedTime : '-'}</td>
+                )}
                 {tab === 'clock' && (
                   <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                     {r.type?.includes('退勤') ? '退勤' : '出勤'}
                   </td>
                 )}
-                {tab !== 'leave' && <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime}</td>}
+                {tab !== 'leave' && tab !== 'holiday' && <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime}</td>}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{r.reason}</td>
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                   <span style={{
@@ -225,6 +239,10 @@ const RequestHistoryPage: React.FC = () => {
           <button style={tabStyle(tab === 'leave')} onClick={() => setTab('leave')}>
             有休申請
             {leaveRequests.length > 0 && <span style={{ marginLeft: 6, background: '#dcfce7', borderRadius: 10, padding: '2px 8px', fontSize: 12 }}>{leaveRequests.length}</span>}
+          </button>
+          <button style={tabStyle(tab === 'holiday')} onClick={() => setTab('holiday')}>
+            休日出勤
+            {holidayRequests.length > 0 && <span style={{ marginLeft: 6, background: '#ffedd5', color: '#c2410c', borderRadius: 10, padding: '2px 8px', fontSize: 12 }}>{holidayRequests.length}</span>}
           </button>
         </div>
         {isLoading ? (

@@ -37,7 +37,7 @@ const ApprovalPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
-  const [tab, setTab] = useState<'clock' | 'overtime' | 'leave'>('clock');
+  const [tab, setTab] = useState<'clock' | 'overtime' | 'leave' | 'holiday'>('clock');
 
   // 却下コメントモーダル用
   const [showDenialModal, setShowDenialModal] = useState(false);
@@ -136,7 +136,8 @@ const ApprovalPage: React.FC = () => {
   const isClock = (r: any) => r.type?.includes('打刻修正');
   const isOvertime = (r: any) => r.type === '残業申請';
   const isLeave = (r: any) => r.type === '有休申請';
-  const filterFn = tab === 'clock' ? isClock : tab === 'overtime' ? isOvertime : isLeave;
+  const isHoliday = (r: any) => r.type === '休日出勤申請' || r.type === '振替休日申請' || r.type === '代休申請';
+  const filterFn = tab === 'clock' ? isClock : tab === 'overtime' ? isOvertime : tab === 'leave' ? isLeave : isHoliday;
 
   const allFiltered = requests.filter(filterFn);
   const pendingRequests = allFiltered.filter(r => r.status === 'pending');
@@ -146,6 +147,7 @@ const ApprovalPage: React.FC = () => {
   const clockPendingCount = requests.filter(r => isClock(r) && r.status === 'pending').length;
   const overtimePendingCount = requests.filter(r => isOvertime(r) && r.status === 'pending').length;
   const leavePendingCount = requests.filter(r => isLeave(r) && r.status === 'pending').length;
+  const holidayPendingCount = requests.filter(r => isHoliday(r) && r.status === 'pending').length;
 
   const renderActionButtons = (r: any) => (
     <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
@@ -184,9 +186,11 @@ const ApprovalPage: React.FC = () => {
           <thead>
             <tr style={{ background: '#f3f4f6' }}>
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>申請者</th>
+              {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>種別</th>}
               {tab === 'clock' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>対象</th>}
-              <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'leave' ? '取得日' : '対象日'}</th>
-              {tab !== 'leave' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
+              <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'leave' ? '取得日' : tab === 'holiday' ? '出勤日' : '対象日'}</th>
+              {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>振替先/代休日</th>}
+              {tab !== 'leave' && tab !== 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>理由</th>
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>操作</th>
             </tr>
@@ -195,13 +199,19 @@ const ApprovalPage: React.FC = () => {
             {items.map(r => (
               <tr key={r.id}>
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{r.userName}</td>
+                {tab === 'holiday' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.type}</td>
+                )}
                 {tab === 'clock' && (
                   <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                     {r.type?.includes('退勤') ? '退勤' : '出勤'}
                   </td>
                 )}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.date}</td>
-                {tab !== 'leave' && <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime}</td>}
+                {tab === 'holiday' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime !== '終日' ? r.requestedTime : '-'}</td>
+                )}
+                {tab !== 'leave' && tab !== 'holiday' && <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime}</td>}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{r.reason}</td>
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                   {renderActionButtons(r)}
@@ -222,9 +232,11 @@ const ApprovalPage: React.FC = () => {
           <thead>
             <tr style={{ background: '#f3f4f6' }}>
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>申請者</th>
+              {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>種別</th>}
               {tab === 'clock' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>対象</th>}
-              <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'leave' ? '取得日' : '対象日'}</th>
-              {tab !== 'leave' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
+              <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'leave' ? '取得日' : tab === 'holiday' ? '出勤日' : '対象日'}</th>
+              {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>振替先/代休日</th>}
+              {tab !== 'leave' && tab !== 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>理由</th>
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>結果</th>
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>却下コメント</th>
@@ -234,13 +246,19 @@ const ApprovalPage: React.FC = () => {
             {items.map(r => (
               <tr key={r.id}>
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{r.userName}</td>
+                {tab === 'holiday' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.type}</td>
+                )}
                 {tab === 'clock' && (
                   <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                     {r.type?.includes('退勤') ? '退勤' : '出勤'}
                   </td>
                 )}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.date}</td>
-                {tab !== 'leave' && <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime}</td>}
+                {tab === 'holiday' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime !== '終日' ? r.requestedTime : '-'}</td>
+                )}
+                {tab !== 'leave' && tab !== 'holiday' && <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime}</td>}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{r.reason}</td>
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                   <span style={{
@@ -295,6 +313,10 @@ const ApprovalPage: React.FC = () => {
           <button style={tabStyle(tab === 'leave')} onClick={() => setTab('leave')}>
             有休申請
             {leavePendingCount > 0 && <span style={{ marginLeft: 6, background: '#dcfce7', color: '#15803d', borderRadius: 10, padding: '2px 8px', fontSize: 12 }}>{leavePendingCount}</span>}
+          </button>
+          <button style={tabStyle(tab === 'holiday')} onClick={() => setTab('holiday')}>
+            休日出勤
+            {holidayPendingCount > 0 && <span style={{ marginLeft: 6, background: '#ffedd5', color: '#c2410c', borderRadius: 10, padding: '2px 8px', fontSize: 12 }}>{holidayPendingCount}</span>}
           </button>
         </div>
       </div>
