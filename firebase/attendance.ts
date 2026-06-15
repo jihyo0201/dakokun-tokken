@@ -96,6 +96,23 @@ export const getAttendancesByUser = async (userId: string) => {
 
 // --- 通知（notifications）API ---
 
+// メール通知送信（fire-and-forget）
+const sendEmailNotification = (title: string, message: string) => {
+  getCompanySettings().then(settings => {
+    if (!settings.notificationEmail || !settings.resendApiKey) return;
+    fetch('/api/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        message,
+        emailTo: settings.notificationEmail,
+        resendApiKey: settings.resendApiKey,
+      }),
+    }).catch(() => {}); // 失敗しても無視
+  }).catch(() => {});
+};
+
 // 通知作成
 export const createNotification = async (notification: {
   recipientId: string;
@@ -110,6 +127,8 @@ export const createNotification = async (notification: {
     ...notification,
     createdAt: now,
   });
+  // メール通知も送信（非同期、失敗しても影響なし）
+  sendEmailNotification(notification.title, notification.message);
   return docRef.id;
 };
 
@@ -299,9 +318,196 @@ export const applyOvertimeApproval = async (
   }
 };
 
+// 勤怠レコードの直接編集（admin用）
+export const updateAttendanceRecord = async (
+  attendanceId: string,
+  updates: { clockIn?: any; clockOut?: any }
+) => {
+  await updateDoc(doc(db, 'attendances', attendanceId), {
+    ...updates,
+    status: 'Corrected',
+  });
+};
+
 // 勤怠レコードの削除（admin用）
 export const deleteAttendance = async (attendanceId: string) => {
   await deleteDoc(doc(db, 'attendances', attendanceId));
+};
+
+// --- 有休残日数管理（leaveBalances）API ---
+
+// ユーザーの有休残高を取得
+export const getLeaveBalances = async (userId: string) => {
+  const q = query(collection(db, 'leaveBalances'), where('userId', '==', userId));
+  const snapshot = await getDocs(q);
+  const results = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  results.sort((a: any, b: any) => (b.fiscalYear || 0) - (a.fiscalYear || 0));
+  return results;
+};
+
+// 全ユーザーの有休残高を取得（admin用）
+export const getAllLeaveBalances = async () => {
+  const snapshot = await getDocs(collection(db, 'leaveBalances'));
+  return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+};
+
+// 有休残高の更新
+export const updateLeaveBalance = async (balanceId: string, data: { granted?: number; used?: number; carried?: number }) => {
+  await updateDoc(doc(db, 'leaveBalances', balanceId), { ...data, updatedAt: Timestamp.now() });
+};
+
+// 有休残高の新規作成
+export const createLeaveBalance = async (data: {
+  userId: string;
+  fiscalYear: number;
+  granted: number;
+  used: number;
+  carried: number;
+  grantedAt: Date;
+  expiresAt: Date;
+}) => {
+  const docRef = await addDoc(collection(db, 'leaveBalances'), {
+    ...data,
+    grantedAt: Timestamp.fromDate(data.grantedAt),
+    expiresAt: Timestamp.fromDate(data.expiresAt),
+    updatedAt: Timestamp.now(),
+  });
+  return docRef.id;
+};
+
+// 勤続年数に基づく自動付与日数計算（労基法39条）
+export const calculateAutoGrant = (hireDate: string): { days: number; yearsWorked: number } => {
+  const hire = new Date(hireDate + 'T00:00:00');
+  const now = new Date();
+  const diffMs = now.getTime() - hire.getTime();
+  const yearsWorked = diffMs / (365.25 * 24 * 60 * 60 * 1000);
+
+  // 労基法39条の有休付与日数テーブル
+  // 6ヶ月: 10日, 1.5年: 11日, 2.5年: 12日, 3.5年: 14日, 4.5年: 16日, 5.5年: 18日, 6.5年以上: 20日
+  if (yearsWorked < 0.5) return { days: 0, yearsWorked };
+  if (yearsWorked < 1.5) return { days: 10, yearsWorked };
+  if (yearsWorked < 2.5) return { days: 11, yearsWorked };
+  if (yearsWorked < 3.5) return { days: 12, yearsWorked };
+  if (yearsWorked < 4.5) return { days: 14, yearsWorked };
+  if (yearsWorked < 5.5) return { days: 16, yearsWorked };
+  if (yearsWorked < 6.5) return { days: 18, yearsWorked };
+  return { days: 20, yearsWorked };
+};
+
+// 有休消化（used をインクリメント）
+export const incrementLeaveUsed = async (userId: string, fiscalYear?: number) => {
+  const year = fiscalYear || new Date().getFullYear();
+  const q = query(
+    collection(db, 'leaveBalances'),
+    where('userId', '==', userId),
+    where('fiscalYear', '==', year)
+  );
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) return;
+  const balanceDoc = snapshot.docs[0];
+  const data = balanceDoc.data();
+  await updateDoc(doc(db, 'leaveBalances', balanceDoc.id), {
+    used: (data.used || 0) + 1,
+    updatedAt: Timestamp.now(),
+  });
+};
+
+// --- 代休・振休残日数管理（compensatoryBalances）API ---
+
+// ユーザーの代休残高を取得
+export const getCompensatoryBalance = async (userId: string) => {
+  const q = query(collection(db, 'compensatoryBalances'), where('userId', '==', userId));
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) return null;
+  return { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
+};
+
+// 全ユーザーの代休残高を取得（admin用）
+export const getAllCompensatoryBalances = async () => {
+  const snapshot = await getDocs(collection(db, 'compensatoryBalances'));
+  return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+};
+
+// 代休権利を+1（休日出勤承認時）
+export const incrementCompensatoryEarned = async (userId: string) => {
+  const q = query(collection(db, 'compensatoryBalances'), where('userId', '==', userId));
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) {
+    await addDoc(collection(db, 'compensatoryBalances'), {
+      userId, earned: 1, used: 0, updatedAt: Timestamp.now(),
+    });
+  } else {
+    const d = snapshot.docs[0];
+    await updateDoc(doc(db, 'compensatoryBalances', d.id), {
+      earned: (d.data().earned || 0) + 1, updatedAt: Timestamp.now(),
+    });
+  }
+};
+
+// 代休消化を+1（代休/振休承認時）
+export const incrementCompensatoryUsed = async (userId: string) => {
+  const q = query(collection(db, 'compensatoryBalances'), where('userId', '==', userId));
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) {
+    await addDoc(collection(db, 'compensatoryBalances'), {
+      userId, earned: 0, used: 1, updatedAt: Timestamp.now(),
+    });
+  } else {
+    const d = snapshot.docs[0];
+    await updateDoc(doc(db, 'compensatoryBalances', d.id), {
+      used: (d.data().used || 0) + 1, updatedAt: Timestamp.now(),
+    });
+  }
+};
+
+// 代休残高を手動調整（admin用）
+export const updateCompensatoryBalance = async (balanceId: string, data: { earned?: number; used?: number }) => {
+  await updateDoc(doc(db, 'compensatoryBalances', balanceId), { ...data, updatedAt: Timestamp.now() });
+};
+
+// 承認済み休暇日の取得（打刻漏れ除外用）
+export const getApprovedLeaveDates = async (userId: string): Promise<Set<string>> => {
+  const leaveTypes = ['有休申請', '代休申請', '振替休日申請'];
+  const dates = new Set<string>();
+  const q = query(
+    collection(db, 'requests'),
+    where('userId', '==', userId),
+    where('status', '==', 'approved')
+  );
+  const snapshot = await getDocs(q);
+  snapshot.docs.forEach(d => {
+    const data = d.data();
+    if (leaveTypes.includes(data.type)) {
+      // 有休: date が休暇日、代休/振休: requestedTime が休暇取得日
+      if (data.type === '有休申請') {
+        dates.add(data.date);
+      } else if (data.requestedTime && data.requestedTime !== '終日') {
+        dates.add(data.requestedTime);
+      }
+    }
+  });
+  return dates;
+};
+
+// 全ユーザーの承認済み休暇日の取得（admin用）
+export const getAllApprovedLeaveDates = async (): Promise<Set<string>> => {
+  const leaveTypes = ['有休申請', '代休申請', '振替休日申請'];
+  const dates = new Set<string>();
+  const q = query(
+    collection(db, 'requests'),
+    where('status', '==', 'approved')
+  );
+  const snapshot = await getDocs(q);
+  snapshot.docs.forEach(d => {
+    const data = d.data();
+    if (leaveTypes.includes(data.type)) {
+      const key = data.type === '有休申請'
+        ? `${data.userId}_${data.date}`
+        : (data.requestedTime && data.requestedTime !== '終日' ? `${data.userId}_${data.requestedTime}` : '');
+      if (key) dates.add(key);
+    }
+  });
+  return dates;
 };
 
 // --- 目安箱（suggestions）API ---

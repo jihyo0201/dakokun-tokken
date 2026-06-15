@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, getAttendancesByUser, deleteAttendance } from '../firebase/attendance';
+import { clockIn, clockOut, getAllAttendances, createRequest, getRequestsByUser, getRequestsBySupervisor, updateRequestStatus, createNotification, getAttendancesBySubordinates, applyClockCorrection, applyOvertimeApproval, getCompanySettings, getAttendancesByUser, deleteAttendance, getLeaveBalances, getAllLeaveBalances, incrementLeaveUsed, updateAttendanceRecord, getApprovedLeaveDates, getAllApprovedLeaveDates, getCompensatoryBalance, incrementCompensatoryEarned, incrementCompensatoryUsed } from '../firebase/attendance';
 import { getAllUsers } from '../firebase/auth';
+import { Timestamp } from 'firebase/firestore';
 import dayjs from 'dayjs';
 
 // 労基法準拠の休憩控除（6h超→45分、8h超→1時間）
@@ -311,6 +312,12 @@ function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd
 
     const totalHours = Object.values(dailyHours).reduce((s, h) => s + h, 0);
 
+    // 深夜労働時間の合計
+    let totalLateNightHours = 0;
+    recs.forEach(r => {
+      totalLateNightHours += calculateLateNightHours(r.clockIn, r.clockOut);
+    });
+
     const weekDetails = Object.entries(weeklyHours)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([monday, h]) => ({
@@ -321,7 +328,7 @@ function calculateOvertimeSummary(records: any[], periodStart: string, periodEnd
 
     return {
       userId, userName, totalHours, dailyOvertime, weeklyOvertime, monthlyOvertime,
-      prescribedMonthlyHours, businessDays, weekDetails,
+      prescribedMonthlyHours, businessDays, weekDetails, totalLateNightHours,
       workScheduleType: scheduleType, isOvertimeExempt: isExempt,
     };
   }).sort((a, b) => a.userName.localeCompare(b.userName));
@@ -353,6 +360,108 @@ function filterByClosingPeriod(records: any[], yearMonth: string, closingDay: nu
   return records.filter(r => r.date >= start && r.date <= end);
 }
 
+// 36協定チェック
+type Article36Status = {
+  monthlyStatus: 'ok' | 'warning' | 'exceeded';  // 月45h
+  annualStatus: 'ok' | 'warning' | 'exceeded';    // 年360h
+  specialMonthlyStatus: 'ok' | 'warning' | 'exceeded'; // 特別条項月100h
+  specialAvgStatus: 'ok' | 'warning' | 'exceeded';     // 特別条項2-6ヶ月平均80h
+  monthlyHours: number;
+  annualHours: number;
+  alerts: string[];
+};
+
+function check36Agreement(monthlyOvertime: number, annualOvertime: number, recentMonthlyOvertimes: number[]): Article36Status {
+  const alerts: string[] = [];
+
+  // 月45h
+  let monthlyStatus: 'ok' | 'warning' | 'exceeded' = 'ok';
+  if (monthlyOvertime >= 45) { monthlyStatus = 'exceeded'; alerts.push(`月次${monthlyOvertime.toFixed(1)}h（上限45h超過）`); }
+  else if (monthlyOvertime >= 36) { monthlyStatus = 'warning'; alerts.push(`月次${monthlyOvertime.toFixed(1)}h（警告: 80%超）`); }
+
+  // 年360h
+  let annualStatus: 'ok' | 'warning' | 'exceeded' = 'ok';
+  if (annualOvertime >= 360) { annualStatus = 'exceeded'; alerts.push(`年次${annualOvertime.toFixed(1)}h（上限360h超過）`); }
+  else if (annualOvertime >= 288) { annualStatus = 'warning'; alerts.push(`年次${annualOvertime.toFixed(1)}h（警告: 80%超）`); }
+
+  // 特別条項: 月100h
+  let specialMonthlyStatus: 'ok' | 'warning' | 'exceeded' = 'ok';
+  if (monthlyOvertime >= 100) { specialMonthlyStatus = 'exceeded'; alerts.push(`月次${monthlyOvertime.toFixed(1)}h（特別条項100h超過）`); }
+  else if (monthlyOvertime >= 80) { specialMonthlyStatus = 'warning'; alerts.push(`月次${monthlyOvertime.toFixed(1)}h（特別条項警告: 80%超）`); }
+
+  // 特別条項: 2-6ヶ月平均80h
+  let specialAvgStatus: 'ok' | 'warning' | 'exceeded' = 'ok';
+  const allMonths = [...recentMonthlyOvertimes, monthlyOvertime];
+  for (let n = 2; n <= Math.min(6, allMonths.length); n++) {
+    const recent = allMonths.slice(-n);
+    const avg = recent.reduce((s, h) => s + h, 0) / recent.length;
+    if (avg >= 80) { specialAvgStatus = 'exceeded'; alerts.push(`${n}ヶ月平均${avg.toFixed(1)}h（上限80h超過）`); break; }
+    else if (avg >= 64) { specialAvgStatus = 'warning'; }
+  }
+
+  return {
+    monthlyStatus, annualStatus, specialMonthlyStatus, specialAvgStatus,
+    monthlyHours: monthlyOvertime, annualHours: annualOvertime, alerts,
+  };
+}
+
+// 深夜労働時間の計算（22:00〜05:00）
+function calculateLateNightHours(clockIn: any, clockOut: any): number {
+  if (!clockIn?.toDate || !clockOut?.toDate) return 0;
+  const start = clockIn.toDate().getTime();
+  const end = clockOut.toDate().getTime();
+  if (end <= start) return 0;
+
+  let totalMs = 0;
+  const startDate = new Date(start);
+
+  // 開始日の前日22:00〜翌日05:00から、終了日の22:00〜翌日05:00までチェック
+  const baseDate = new Date(startDate);
+  baseDate.setHours(0, 0, 0, 0);
+  // 前日から開始（前日22:00〜当日05:00の深夜帯をカバー）
+  baseDate.setDate(baseDate.getDate() - 1);
+
+  for (let d = new Date(baseDate); d.getTime() < end + 24 * 60 * 60 * 1000; d.setDate(d.getDate() + 1)) {
+    // この日の22:00
+    const nightStart = new Date(d);
+    nightStart.setHours(22, 0, 0, 0);
+    // 翌日の05:00
+    const nightEnd = new Date(d);
+    nightEnd.setDate(nightEnd.getDate() + 1);
+    nightEnd.setHours(5, 0, 0, 0);
+
+    // 勤務時間と深夜帯の重なりを計算
+    const overlapStart = Math.max(start, nightStart.getTime());
+    const overlapEnd = Math.min(end, nightEnd.getTime());
+    if (overlapEnd > overlapStart) {
+      totalMs += overlapEnd - overlapStart;
+    }
+  }
+
+  return totalMs / (1000 * 60 * 60);
+}
+
+// 遅刻・早退の検知
+function detectLateEarly(clockIn: any, clockOut: any, standardStart: string, standardEnd: string): { late: number; early: number } {
+  const result = { late: 0, early: 0 };
+  if (!standardStart || !standardEnd) return result;
+  if (clockIn?.toDate) {
+    const inDate = clockIn.toDate();
+    const [sh, sm] = standardStart.split(':').map(Number);
+    const startMinutes = sh * 60 + sm;
+    const inMinutes = inDate.getHours() * 60 + inDate.getMinutes();
+    if (inMinutes > startMinutes) result.late = inMinutes - startMinutes;
+  }
+  if (clockOut?.toDate) {
+    const outDate = clockOut.toDate();
+    const [eh, em] = standardEnd.split(':').map(Number);
+    const endMinutes = eh * 60 + em;
+    const outMinutes = outDate.getHours() * 60 + outDate.getMinutes();
+    if (outMinutes < endMinutes) result.early = endMinutes - outMinutes;
+  }
+  return result;
+}
+
 function exportMonthlyCSV(records: any[], yearMonth: string, closingDay: number, usersMap: Record<string, any> = {}) {
   const { label } = getClosingPeriod(yearMonth, closingDay);
   const filtered = filterByClosingPeriod(records, yearMonth, closingDay);
@@ -372,12 +481,13 @@ function exportMonthlyCSV(records: any[], yearMonth: string, closingDay: number,
   });
 
   // 明細
-  const detailHeaders = ['日付', '社員名', '勤務区分', '出勤', '退勤', '労働時間(h)'];
+  const detailHeaders = ['日付', '社員名', '勤務区分', '出勤', '退勤', '労働時間(h)', '深夜(h)'];
   const detailRows = filtered
     .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || '') || (a.userName || '').localeCompare(b.userName || ''))
     .map(r => {
       const userInfo = usersMap[r.userId] || {};
       const scheduleType = userInfo.workScheduleType || 'regular';
+      const lateNight = calculateLateNightHours(r.clockIn, r.clockOut);
       return [
         r.date,
         r.userName,
@@ -385,6 +495,7 @@ function exportMonthlyCSV(records: any[], yearMonth: string, closingDay: number,
         r.clockIn?.toDate?.().toLocaleTimeString?.() || '',
         r.clockOut?.toDate?.().toLocaleTimeString?.() || '',
         getWorkHours(r.clockIn, r.clockOut, scheduleType, userInfo.deemedHours).toFixed(2),
+        lateNight > 0 ? lateNight.toFixed(2) : '',
       ];
     });
 
@@ -428,6 +539,12 @@ const DashboardPage: React.FC = () => {
   const [requests, setRequests] = useState<any[]>([]);
   const [myRequests, setMyRequests] = useState<any[]>([]);
   const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [missingClockOutRecords, setMissingClockOutRecords] = useState<any[]>([]);
+  const [approvedLeaveDates, setApprovedLeaveDates] = useState<Set<string>>(new Set());
+  const [adminApprovedLeaveDates, setAdminApprovedLeaveDates] = useState<Set<string>>(new Set());
+  const [allLeaveBalances, setAllLeaveBalances] = useState<any[]>([]);
+  const [leaveBalance, setLeaveBalance] = useState<{ remaining: number; total: number } | null>(null);
+  const [compensatoryBalance, setCompensatoryBalance] = useState<{ earned: number; used: number } | null>(null);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestType, setRequestType] = useState<'打刻修正' | '残業申請'>('打刻修正');
   const [requestDate, setRequestDate] = useState('');
@@ -454,6 +571,12 @@ const DashboardPage: React.FC = () => {
   const [holidayWorkError, setHolidayWorkError] = useState('');
   const [selectedMonth, setSelectedMonth] = useState(() => dayjs().format('YYYY-MM'));
   const [closingDay, setClosingDay] = useState(10);
+  const [standardStartTime, setStandardStartTime] = useState('');
+  const [standardEndTime, setStandardEndTime] = useState('');
+  // admin勤怠直接編集用
+  const [editingAttendanceId, setEditingAttendanceId] = useState<string | null>(null);
+  const [editClockIn, setEditClockIn] = useState('');
+  const [editClockOut, setEditClockOut] = useState('');
   // 締め日に基づいてselectedMonthを自動設定するフラグ（初回のみ）
   const [monthAutoSet, setMonthAutoSet] = useState(false);
 
@@ -478,10 +601,39 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  // 打刻漏れチェック（承認済み休暇日を除外）
+  const checkMissingClockOut = async (leaveDates?: Set<string>) => {
+    if (!user) return;
+    const today = dayjs().format('YYYY-MM-DD');
+    const records = await getAttendancesByUser(user.uid);
+    const leave = leaveDates || approvedLeaveDates;
+    const missing = records.filter((r: any) => r.clockIn && !r.clockOut && r.date < today && !leave.has(r.date));
+    setMissingClockOutRecords(missing);
+  };
+
   useEffect(() => {
     if (!user) return;
     // 今日の打刻状態を取得
     loadTodayStatus();
+    // 承認済み休暇日を取得してから打刻漏れチェック
+    getApprovedLeaveDates(user.uid).then(dates => {
+      setApprovedLeaveDates(dates);
+      checkMissingClockOut(dates);
+    });
+    // 代休残日数を取得
+    getCompensatoryBalance(user.uid).then(b => {
+      if (b) setCompensatoryBalance({ earned: (b as any).earned || 0, used: (b as any).used || 0 });
+    });
+    // 有休残日数を取得
+    getLeaveBalances(user.uid).then(balances => {
+      const currentYear = new Date().getFullYear();
+      const current = balances.find((b: any) => b.fiscalYear === currentYear);
+      if (current) {
+        const total = ((current as any).granted || 0) + ((current as any).carried || 0);
+        const remaining = total - ((current as any).used || 0);
+        setLeaveBalance({ remaining, total });
+      }
+    });
     // 全ロール共通: 自分の申請履歴
     getRequestsByUser(user.uid).then(setMyRequests);
 
@@ -489,6 +641,8 @@ const DashboardPage: React.FC = () => {
     getCompanySettings().then(s => {
       const cd = s.closingDay || 10;
       setClosingDay(cd);
+      setStandardStartTime(s.standardStartTime || '');
+      setStandardEndTime(s.standardEndTime || '');
       // 締め日を過ぎていたら翌月を表示（初回のみ）
       if (!monthAutoSet) {
         const today = dayjs();
@@ -502,6 +656,8 @@ const DashboardPage: React.FC = () => {
     if (user.role === 'admin') {
       getAllAttendances().then(setAttendances);
       getAllUsers().then(setAllUsers);
+      getAllApprovedLeaveDates().then(setAdminApprovedLeaveDates);
+      getAllLeaveBalances().then(setAllLeaveBalances);
     }
     if (user.role === 'supervisor') {
       loadRequests();
@@ -531,6 +687,12 @@ const DashboardPage: React.FC = () => {
           await applyClockCorrection(request.userId, request.userName || '', request.date, target, request.requestedTime);
         } else if (request.type === '残業申請') {
           await applyOvertimeApproval(request.userId, request.userName || '', request.date, request.requestedTime);
+        } else if (request.type === '有休申請') {
+          await incrementLeaveUsed(request.userId);
+        } else if (request.type === '休日出勤申請') {
+          await incrementCompensatoryEarned(request.userId);
+        } else if (request.type === '振替休日申請' || request.type === '代休申請') {
+          await incrementCompensatoryUsed(request.userId);
         }
       }
 
@@ -684,6 +846,32 @@ const DashboardPage: React.FC = () => {
   return (
     <>
       <style>{responsiveStyle}</style>
+      {/* 打刻漏れアラート */}
+      {missingClockOutRecords.length > 0 && (
+        <div style={{
+          maxWidth: 760, margin: '16px auto 0', background: '#fef2f2', border: '2px solid #fca5a5',
+          borderRadius: 12, padding: '14px 20px', display: 'flex', alignItems: 'flex-start', gap: 12,
+        }}>
+          <svg width="22" height="22" fill="none" stroke="#dc2626" strokeWidth="2" viewBox="0 0 24 24" style={{ flexShrink: 0, marginTop: 2 }}>
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: '#dc2626', marginBottom: 4 }}>
+              打刻漏れがあります（{missingClockOutRecords.length}件）
+            </div>
+            <div style={{ fontSize: 13, color: '#991b1b', lineHeight: 1.6 }}>
+              以下の日付で退勤打刻がされていません。出退勤履歴から打刻修正を申請してください。
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+              {missingClockOutRecords.map(r => (
+                <span key={r.id} style={{ background: '#fee2e2', borderRadius: 6, padding: '2px 10px', fontSize: 13, fontWeight: 600, color: '#b91c1c' }}>
+                  {r.date}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {/* タイムレコーダーカード（中央1カラム縦並び） */}
       <div style={recorderCardStyle}>
         <h1 style={{ fontWeight: 'bold', fontSize: 22, marginBottom: 8, textAlign: 'center' }}>タイムレコーダー</h1>
@@ -874,6 +1062,26 @@ const DashboardPage: React.FC = () => {
         <div style={modalOverlayStyle}>
           <div style={modalCardStyle}>
             <h2 style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 16 }}>有休申請フォーム</h2>
+            {leaveBalance !== null && (
+              <div style={{
+                background: leaveBalance.remaining <= 0 ? '#fef2f2' : '#f0fdf4',
+                borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 14,
+                color: leaveBalance.remaining <= 0 ? '#991b1b' : '#15803d', fontWeight: 600,
+              }}>
+                有休残日数: {leaveBalance.remaining}日 / {leaveBalance.total}日
+                {leaveBalance.remaining <= 0 && (
+                  <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}>（残日数なし。管理者判断で申請可能です）</span>
+                )}
+              </div>
+            )}
+            {compensatoryBalance && (compensatoryBalance.earned - compensatoryBalance.used) > 0 && (
+              <div style={{
+                background: '#eff6ff', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 14,
+                color: '#1e40af', fontWeight: 600,
+              }}>
+                代休残日数: {compensatoryBalance.earned - compensatoryBalance.used}日（取得{compensatoryBalance.earned}日 / 消化{compensatoryBalance.used}日）
+              </div>
+            )}
             {leaveSuccess ? (
               <div style={{ color: '#15803d', fontWeight: 'bold', textAlign: 'center', marginBottom: 16 }}>
                 有休申請が送信されました！
@@ -947,6 +1155,74 @@ const DashboardPage: React.FC = () => {
           </div>
         </div>
       )}
+      {/* 管理者用: 年5日有休取得義務チェック */}
+      {user?.role === 'admin' && (() => {
+        const currentYear = new Date().getFullYear();
+        const warnings = allUsers
+          .map(u => {
+            const balance = allLeaveBalances.find((b: any) => b.userId === u.id && b.fiscalYear === currentYear);
+            if (!balance) return null;
+            const totalGranted = (balance.granted || 0) + (balance.carried || 0);
+            if (totalGranted < 10) return null;
+            const used = balance.used || 0;
+            if (used >= 5) return null;
+            return { userId: u.id, userName: u.name, used, remaining: 5 - used };
+          })
+          .filter(Boolean) as { userId: string; userName: string; used: number; remaining: number }[];
+        if (warnings.length === 0) return null;
+        return (
+          <div style={{
+            maxWidth: 900, margin: '16px auto 0', background: '#fffbeb', border: '2px solid #fbbf24',
+            borderRadius: 12, padding: '16px 20px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              <svg width="20" height="20" fill="none" stroke="#d97706" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              <span style={{ fontWeight: 700, fontSize: 16, color: '#d97706' }}>年5日有休取得義務 未達者 ({warnings.length}名)</span>
+            </div>
+            <p style={{ fontSize: 12, color: '#92400e', marginBottom: 8 }}>年10日以上付与された社員は年5日以上の有休取得が義務付けられています（労基法39条7項）。</p>
+            {warnings.map(w => (
+              <div key={w.userId} style={{ marginBottom: 4, fontSize: 13, color: '#92400e' }}>
+                <strong>{w.userName}</strong>: 消化{w.used}日 — あと<span style={{ fontWeight: 700, color: '#dc2626' }}>{w.remaining}日</span>取得必要
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+      {/* 管理者用: 36協定警告パネル */}
+      {user?.role === 'admin' && (() => {
+        const period = getClosingPeriod(selectedMonth, closingDay);
+        const filtered = filterByClosingPeriod(attendances, selectedMonth, closingDay);
+        const overtimeSummary = calculateOvertimeSummary(filtered, period.start, period.end, usersMap);
+        const alertItems = overtimeSummary
+          .filter(s => !s.isOvertimeExempt)
+          .map(s => {
+            const totalOT = s.dailyOvertime + s.weeklyOvertime + Math.max(0, s.monthlyOvertime);
+            const status = check36Agreement(totalOT, totalOT, []);
+            return { ...s, status, totalOT };
+          })
+          .filter(s => s.status.alerts.length > 0);
+        if (alertItems.length === 0) return null;
+        return (
+          <div style={{
+            maxWidth: 900, margin: '16px auto 0', background: '#fef2f2', border: '2px solid #fca5a5',
+            borderRadius: 12, padding: '16px 20px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              <svg width="20" height="20" fill="none" stroke="#dc2626" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              <span style={{ fontWeight: 700, fontSize: 16, color: '#dc2626' }}>36協定 警告・超過 ({alertItems.length}名)</span>
+            </div>
+            {alertItems.map(item => (
+              <div key={item.userId} style={{ marginBottom: 6, fontSize: 13, color: '#991b1b' }}>
+                <strong>{item.userName}</strong>: {item.status.alerts.join('、')}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
       {/* 管理者用: 全従業員の打刻履歴テーブル */}
       {user?.role === 'admin' && (
         <div style={{
@@ -985,12 +1261,13 @@ const DashboardPage: React.FC = () => {
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>退勤</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>労働時間</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700, color: '#dc2626' }}>法定外</th>
+                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700, color: '#7c3aed' }}>深夜</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700, width: 60 }}>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {filterByClosingPeriod(attendances, selectedMonth, closingDay).length === 0 ? (
-                  <tr><td colSpan={7} style={{ padding: 16, color: '#888', textAlign: 'center' }}>該当期間のデータがありません</td></tr>
+                  <tr><td colSpan={8} style={{ padding: 16, color: '#888', textAlign: 'center' }}>該当期間のデータがありません</td></tr>
                 ) : (
                   filterByClosingPeriod(attendances, selectedMonth, closingDay)
                     .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''))
@@ -1000,25 +1277,104 @@ const DashboardPage: React.FC = () => {
                     const isExempt = st === 'deemed' || st === 'managerial';
                     const hours = getWorkHours(a.clockIn, a.clockOut, st, ui.deemedHours);
                     const dailyOT = isExempt ? 0 : Math.max(0, hours - 8);
+                    const isMissingClockOut = a.clockIn && !a.clockOut && a.date < dayjs().format('YYYY-MM-DD') && !adminApprovedLeaveDates.has(`${a.userId}_${a.date}`);
+                    const userStartTime = ui.standardStartTime || standardStartTime;
+                    const userEndTime = ui.standardEndTime || standardEndTime;
+                    const lateEarly = st !== 'deemed' ? detectLateEarly(a.clockIn, a.clockOut, userStartTime, userEndTime) : { late: 0, early: 0 };
+                    const isEditing = editingAttendanceId === a.id;
                     return (
-                    <tr key={a.id}>
+                    <tr key={a.id} style={isMissingClockOut ? { background: '#fef2f2' } : undefined}>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.date}</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.userName}</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockIn?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{a.clockOut?.toDate?.().toLocaleTimeString?.() || '--:--:--'}</td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        {isEditing ? (
+                          <input type="time" value={editClockIn} onChange={e => setEditClockIn(e.target.value)} style={{ padding: '2px 6px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14, width: 110 }} />
+                        ) : (
+                          <>
+                            {a.clockIn?.toDate?.().toLocaleTimeString?.() || '--:--:--'}
+                            {lateEarly.late > 0 && (
+                              <span style={{ background: '#fbbf24', color: '#92400e', borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 700, marginLeft: 6 }}>
+                                遅刻{lateEarly.late}分
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        {isEditing ? (
+                          <input type="time" value={editClockOut} onChange={e => setEditClockOut(e.target.value)} style={{ padding: '2px 6px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14, width: 110 }} />
+                        ) : (
+                          <>
+                            {a.clockOut?.toDate?.().toLocaleTimeString?.() || '--:--:--'}
+                            {isMissingClockOut && (
+                              <span style={{ background: '#dc2626', color: '#fff', borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 700, marginLeft: 6 }}>打刻漏れ</span>
+                            )}
+                            {lateEarly.early > 0 && (
+                              <span style={{ background: '#fb923c', color: '#7c2d12', borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 700, marginLeft: 6 }}>
+                                早退{lateEarly.early}分
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{getWorkDuration(a.clockIn, a.clockOut, st, ui.deemedHours)}</td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: isExempt ? '#9ca3af' : dailyOT > 0 ? '#dc2626' : '#ccc', fontWeight: dailyOT > 0 ? 700 : 400 }}>
                         {isExempt ? '対象外' : dailyOT > 0 ? dailyOT.toFixed(2) + ' h' : '-'}
                       </td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: '#7c3aed' }}>
+                        {(() => { const nh = calculateLateNightHours(a.clockIn, a.clockOut); return nh > 0 ? nh.toFixed(2) + ' h' : '-'; })()}
+                      </td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
-                        <button
-                          onClick={async () => {
-                            if (!window.confirm(`${a.userName}さんの${a.date}の勤怠記録を削除しますか？`)) return;
-                            await deleteAttendance(a.id);
-                            setAttendances(prev => prev.filter(att => att.id !== a.id));
-                          }}
-                          style={{ background: 'none', border: '1px solid #fca5a5', borderRadius: 4, padding: '2px 8px', fontSize: 12, color: '#dc2626', cursor: 'pointer' }}
-                        >削除</button>
+                        {isEditing ? (
+                          <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                            <button
+                              onClick={async () => {
+                                const updates: any = {};
+                                if (editClockIn) {
+                                  const [h, m] = editClockIn.split(':').map(Number);
+                                  const d = new Date(a.date + 'T00:00:00');
+                                  d.setHours(h, m, 0, 0);
+                                  updates.clockIn = Timestamp.fromDate(d);
+                                }
+                                if (editClockOut) {
+                                  const [h, m] = editClockOut.split(':').map(Number);
+                                  const d = new Date(a.date + 'T00:00:00');
+                                  d.setHours(h, m, 0, 0);
+                                  updates.clockOut = Timestamp.fromDate(d);
+                                }
+                                await updateAttendanceRecord(a.id, updates);
+                                setAttendances(prev => prev.map(att => att.id === a.id ? { ...att, ...updates } : att));
+                                setEditingAttendanceId(null);
+                              }}
+                              style={{ background: '#2563eb', color: '#fff', border: 'none', borderRadius: 4, padding: '2px 8px', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
+                            >保存</button>
+                            <button
+                              onClick={() => setEditingAttendanceId(null)}
+                              style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 4, padding: '2px 8px', fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
+                            >取消</button>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                            <button
+                              onClick={() => {
+                                setEditingAttendanceId(a.id);
+                                const ciTime = a.clockIn?.toDate?.();
+                                const coTime = a.clockOut?.toDate?.();
+                                setEditClockIn(ciTime ? `${String(ciTime.getHours()).padStart(2,'0')}:${String(ciTime.getMinutes()).padStart(2,'0')}` : '');
+                                setEditClockOut(coTime ? `${String(coTime.getHours()).padStart(2,'0')}:${String(coTime.getMinutes()).padStart(2,'0')}` : '');
+                              }}
+                              style={{ background: 'none', border: '1px solid #93c5fd', borderRadius: 4, padding: '2px 8px', fontSize: 12, color: '#2563eb', cursor: 'pointer' }}
+                            >編集</button>
+                            <button
+                              onClick={async () => {
+                                if (!window.confirm(`${a.userName}さんの${a.date}の勤怠記録を削除しますか？`)) return;
+                                await deleteAttendance(a.id);
+                                setAttendances(prev => prev.filter(att => att.id !== a.id));
+                              }}
+                              style={{ background: 'none', border: '1px solid #fca5a5', borderRadius: 4, padding: '2px 8px', fontSize: 12, color: '#dc2626', cursor: 'pointer' }}
+                            >削除</button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                     );
@@ -1054,6 +1410,8 @@ const DashboardPage: React.FC = () => {
                     <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700, color: '#dc2626' }}>日の法定外合計</th>
                     <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700, color: '#dc2626' }}>週の法定外合計</th>
                     <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700, color: '#dc2626' }}>月の法定外</th>
+                    <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700, color: '#7c3aed' }}>深夜合計</th>
+                    <th style={{ borderBottom: '2px solid #fca5a5', padding: 10, fontWeight: 700 }}>36協定</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1079,6 +1437,27 @@ const DashboardPage: React.FC = () => {
                       </td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.isOvertimeExempt ? '#9ca3af' : s.monthlyOvertime > 0 ? '#dc2626' : '#888', fontWeight: s.monthlyOvertime > 0 ? 700 : 400 }}>
                         {s.isOvertimeExempt ? '対象外' : s.monthlyOvertime > 0 ? s.monthlyOvertime.toFixed(2) + ' h' : '-'}
+                      </td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: s.totalLateNightHours > 0 ? '#7c3aed' : '#888', fontWeight: s.totalLateNightHours > 0 ? 700 : 400 }}>
+                        {s.totalLateNightHours > 0 ? s.totalLateNightHours.toFixed(2) + ' h' : '-'}
+                      </td>
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        {(() => {
+                          if (s.isOvertimeExempt) return <span style={{ color: '#9ca3af', fontSize: 12 }}>対象外</span>;
+                          const totalOT = s.dailyOvertime + s.weeklyOvertime + Math.max(0, s.monthlyOvertime);
+                          const status36 = check36Agreement(totalOT, totalOT, []); // 年次は現在月のみ（他月データ未ロード）
+                          const worstStatus = [status36.monthlyStatus, status36.specialMonthlyStatus].includes('exceeded') ? 'exceeded'
+                            : [status36.monthlyStatus, status36.specialMonthlyStatus].includes('warning') ? 'warning' : 'ok';
+                          return (
+                            <span style={{
+                              fontSize: 11, borderRadius: 4, padding: '2px 8px', fontWeight: 700,
+                              background: worstStatus === 'exceeded' ? '#fee2e2' : worstStatus === 'warning' ? '#fef9c3' : '#f0fdf4',
+                              color: worstStatus === 'exceeded' ? '#dc2626' : worstStatus === 'warning' ? '#b45309' : '#15803d',
+                            }}>
+                              {worstStatus === 'exceeded' ? '超過' : worstStatus === 'warning' ? '警告' : '正常'}
+                            </span>
+                          );
+                        })()}
                       </td>
                     </tr>
                   ))}

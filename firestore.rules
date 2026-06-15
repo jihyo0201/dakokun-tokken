@@ -81,6 +81,31 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // leaveBalancesコレクション（有休残日数）
+    // - 自分のデータは読める / admin は全員分読める
+    // - 作成・更新・削除は admin のみ
+    match /leaveBalances/{balanceId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || isAdmin()
+      );
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // compensatoryBalancesコレクション（代休・振休残日数）
+    // - 自分のデータは読める / admin は全員分読める
+    // - 作成・更新は admin または supervisor（承認時に自動増減）
+    // - 削除は admin のみ
+    match /compensatoryBalances/{balanceId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || isAdmin()
+      );
+      allow create: if isAuthenticated() && (isAdmin() || isSupervisor());
+      allow update: if isAuthenticated() && (isAdmin() || isSupervisor());
+      allow delete: if isAdmin();
+    }
+
     // suggestionsコレクション（目安箱）
     // - admin は全件読める
     // - ログインユーザーは誰でも作成可能

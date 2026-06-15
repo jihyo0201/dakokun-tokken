@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { getAttendancesByUser, createRequest } from '../firebase/attendance';
+import { getAttendancesByUser, createRequest, getCompanySettings, getApprovedLeaveDates } from '../firebase/attendance';
+import dayjs from 'dayjs';
 
 const getWorkDuration = (clockIn: any, clockOut: any) => {
   if (!clockIn?.toDate || !clockOut?.toDate) return '';
@@ -53,10 +54,53 @@ function exportAttendancesCSV(records: any[], userName: string) {
   document.body.removeChild(link);
 }
 
+function calculateLateNightHours(clockIn: any, clockOut: any): number {
+  if (!clockIn?.toDate || !clockOut?.toDate) return 0;
+  const start = clockIn.toDate().getTime();
+  const end = clockOut.toDate().getTime();
+  if (end <= start) return 0;
+  let totalMs = 0;
+  const startDate = new Date(start);
+  const baseDate = new Date(startDate);
+  baseDate.setHours(0, 0, 0, 0);
+  baseDate.setDate(baseDate.getDate() - 1);
+  for (let d = new Date(baseDate); d.getTime() < end + 24 * 60 * 60 * 1000; d.setDate(d.getDate() + 1)) {
+    const nightStart = new Date(d); nightStart.setHours(22, 0, 0, 0);
+    const nightEnd = new Date(d); nightEnd.setDate(nightEnd.getDate() + 1); nightEnd.setHours(5, 0, 0, 0);
+    const overlapStart = Math.max(start, nightStart.getTime());
+    const overlapEnd = Math.min(end, nightEnd.getTime());
+    if (overlapEnd > overlapStart) totalMs += overlapEnd - overlapStart;
+  }
+  return totalMs / (1000 * 60 * 60);
+}
+
+function detectLateEarly(clockIn: any, clockOut: any, standardStart: string, standardEnd: string): { late: number; early: number } {
+  const result = { late: 0, early: 0 };
+  if (!standardStart || !standardEnd) return result;
+  if (clockIn?.toDate) {
+    const inDate = clockIn.toDate();
+    const [sh, sm] = standardStart.split(':').map(Number);
+    const startMinutes = sh * 60 + sm;
+    const inMinutes = inDate.getHours() * 60 + inDate.getMinutes();
+    if (inMinutes > startMinutes) result.late = inMinutes - startMinutes;
+  }
+  if (clockOut?.toDate) {
+    const outDate = clockOut.toDate();
+    const [eh, em] = standardEnd.split(':').map(Number);
+    const endMinutes = eh * 60 + em;
+    const outMinutes = outDate.getHours() * 60 + outDate.getMinutes();
+    if (outMinutes < endMinutes) result.early = endMinutes - outMinutes;
+  }
+  return result;
+}
+
 const AttendanceHistoryPage: React.FC = () => {
   const { user } = useAuth();
   const [attendances, setAttendances] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [standardStartTime, setStandardStartTime] = useState('');
+  const [standardEndTime, setStandardEndTime] = useState('');
+  const [approvedLeaveDates, setApprovedLeaveDates] = useState<Set<string>>(new Set());
 
   // 修正申請モーダル用
   const [showModal, setShowModal] = useState(false);
@@ -78,6 +122,13 @@ const AttendanceHistoryPage: React.FC = () => {
 
   useEffect(() => {
     loadAttendances();
+    getCompanySettings().then(s => {
+      setStandardStartTime(s.standardStartTime || '');
+      setStandardEndTime(s.standardEndTime || '');
+    });
+    if (user) {
+      getApprovedLeaveDates(user.uid).then(setApprovedLeaveDates);
+    }
   }, [user]);
 
   const openCorrectionModal = (date: string, target: '出勤' | '退勤') => {
@@ -154,33 +205,54 @@ const AttendanceHistoryPage: React.FC = () => {
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>出勤</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>退勤</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>労働時間</th>
+                  <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700, color: '#7c3aed' }}>深夜</th>
                   <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>残業</th>
                 </tr>
               </thead>
               <tbody>
-                {attendances.map(a => (
-                  <tr key={a.id}>
+                {attendances.map(a => {
+                  const isMissingClockOut = a.clockIn && !a.clockOut && a.date < dayjs().format('YYYY-MM-DD') && !approvedLeaveDates.has(a.date);
+                  const lateEarly = detectLateEarly(a.clockIn, a.clockOut, standardStartTime, standardEndTime);
+                  return (
+                  <tr key={a.id} style={isMissingClockOut ? { background: '#fef2f2' } : undefined}>
                     <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{a.date}</td>
                     <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                       {a.clockIn?.toDate?.().toLocaleTimeString?.() || '--:--:--'}
+                      {lateEarly.late > 0 && (
+                        <span style={{ background: '#fbbf24', color: '#92400e', borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 700, marginLeft: 6 }}>
+                          遅刻{lateEarly.late}分
+                        </span>
+                      )}
                       <button style={editBtnStyle} onClick={() => openCorrectionModal(a.date, '出勤')} title="出勤時刻を修正申請">
                         修正
                       </button>
                     </td>
                     <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                       {a.clockOut?.toDate?.().toLocaleTimeString?.() || '--:--:--'}
+                      {isMissingClockOut && (
+                        <span style={{ background: '#dc2626', color: '#fff', borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 700, marginLeft: 6 }}>打刻漏れ</span>
+                      )}
+                      {lateEarly.early > 0 && (
+                        <span style={{ background: '#fb923c', color: '#7c2d12', borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 700, marginLeft: 6 }}>
+                          早退{lateEarly.early}分
+                        </span>
+                      )}
                       <button style={editBtnStyle} onClick={() => openCorrectionModal(a.date, '退勤')} title="退勤時刻を修正申請">
                         修正
                       </button>
                     </td>
                     <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{getWorkDuration(a.clockIn, a.clockOut)}</td>
+                    <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', color: '#7c3aed' }}>
+                      {(() => { const nh = calculateLateNightHours(a.clockIn, a.clockOut); return nh > 0 ? nh.toFixed(2) + ' h' : '-'; })()}
+                    </td>
                     <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                       {a.overtime ? (
                         <span style={{ color: '#b45309', fontWeight: 700 }}>{a.overtime}</span>
                       ) : '-'}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

@@ -5,7 +5,7 @@ import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { auth, db } from '../firebase/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
-type UserWithRole = FirebaseUser & { role?: string; name?: string; supervisorId?: string; workScheduleType?: string; deemedHours?: number; prescribedDailyHours?: number };
+type UserWithRole = FirebaseUser & { role?: string; name?: string; supervisorId?: string; workScheduleType?: string; deemedHours?: number; prescribedDailyHours?: number; hireDate?: string; standardStartTime?: string; standardEndTime?: string };
 
 type AuthContextType = {
   user: UserWithRole | null;

@@ -72,3 +72,13 @@ export const updateUserWorkSchedule = async (
   if (options?.prescribedDailyHours !== undefined) updateData.prescribedDailyHours = options.prescribedDailyHours;
   await updateDoc(doc(db, 'users', uid), updateData);
 };
+
+// ユーザーの入社日を更新（admin 用）
+export const updateUserHireDate = async (uid: string, hireDate: string) => {
+  await updateDoc(doc(db, 'users', uid), { hireDate });
+};
+
+// ユーザーの個別所定勤務時間を更新（admin 用）
+export const updateUserWorkHours = async (uid: string, standardStartTime: string, standardEndTime: string) => {
+  await updateDoc(doc(db, 'users', uid), { standardStartTime, standardEndTime });
+};
