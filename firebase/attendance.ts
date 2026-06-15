@@ -394,8 +394,8 @@ export const calculateAutoGrant = (hireDate: string): { days: number; yearsWorke
   return { days: 20, yearsWorked };
 };
 
-// 有休消化（used をインクリメント）
-export const incrementLeaveUsed = async (userId: string, fiscalYear?: number) => {
+// 有休消化（used をインクリメント、amount で 0.5（半休）や 1（終日）を指定可能）
+export const incrementLeaveUsed = async (userId: string, fiscalYear?: number, amount: number = 1) => {
   const year = fiscalYear || new Date().getFullYear();
   const q = query(
     collection(db, 'leaveBalances'),
@@ -407,7 +407,7 @@ export const incrementLeaveUsed = async (userId: string, fiscalYear?: number) =>
   const balanceDoc = snapshot.docs[0];
   const data = balanceDoc.data();
   await updateDoc(doc(db, 'leaveBalances', balanceDoc.id), {
-    used: (data.used || 0) + 1,
+    used: (data.used || 0) + amount,
     updatedAt: Timestamp.now(),
   });
 };

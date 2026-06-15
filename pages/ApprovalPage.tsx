@@ -7,6 +7,7 @@ import {
   updateRequestStatus,
   applyClockCorrection,
   applyOvertimeApproval,
+  incrementLeaveUsed,
   createNotification,
 } from '../firebase/attendance';
 
@@ -91,6 +92,9 @@ const ApprovalPage: React.FC = () => {
           await applyClockCorrection(request.userId, request.userName || '', request.date, target, request.requestedTime);
         } else if (request.type === '残業申請') {
           await applyOvertimeApproval(request.userId, request.userName || '', request.date, request.requestedTime);
+        } else if (request.type === '有休申請') {
+          const leaveAmount = request.requestedTime?.includes('半休') ? 0.5 : 1;
+          await incrementLeaveUsed(request.userId, undefined, leaveAmount);
         }
       }
 
@@ -189,6 +193,7 @@ const ApprovalPage: React.FC = () => {
               {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>種別</th>}
               {tab === 'clock' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>対象</th>}
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'leave' ? '取得日' : tab === 'holiday' ? '出勤日' : '対象日'}</th>
+              {tab === 'leave' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>区分</th>}
               {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>振替先/代休日</th>}
               {tab !== 'leave' && tab !== 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>理由</th>
@@ -208,6 +213,17 @@ const ApprovalPage: React.FC = () => {
                   </td>
                 )}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.date}</td>
+                {tab === 'leave' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                    <span style={{
+                      background: r.requestedTime?.includes('半休') ? '#fef3c7' : '#dcfce7',
+                      color: r.requestedTime?.includes('半休') ? '#b45309' : '#15803d',
+                      borderRadius: 6, padding: '2px 8px', fontSize: 12, fontWeight: 700,
+                    }}>
+                      {r.requestedTime || '終日'}
+                    </span>
+                  </td>
+                )}
                 {tab === 'holiday' && (
                   <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime !== '終日' ? r.requestedTime : '-'}</td>
                 )}
@@ -235,6 +251,7 @@ const ApprovalPage: React.FC = () => {
               {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>種別</th>}
               {tab === 'clock' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>対象</th>}
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'leave' ? '取得日' : tab === 'holiday' ? '出勤日' : '対象日'}</th>
+              {tab === 'leave' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>区分</th>}
               {tab === 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>振替先/代休日</th>}
               {tab !== 'leave' && tab !== 'holiday' && <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, fontWeight: 700 }}>{tab === 'clock' ? '修正時刻' : '残業時間'}</th>}
               <th style={{ borderBottom: '2px solid #e5e7eb', padding: 10, textAlign: 'left', fontWeight: 700 }}>理由</th>
@@ -255,6 +272,17 @@ const ApprovalPage: React.FC = () => {
                   </td>
                 )}
                 <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.date}</td>
+                {tab === 'leave' && (
+                  <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                    <span style={{
+                      background: r.requestedTime?.includes('半休') ? '#fef3c7' : '#dcfce7',
+                      color: r.requestedTime?.includes('半休') ? '#b45309' : '#15803d',
+                      borderRadius: 6, padding: '2px 8px', fontSize: 12, fontWeight: 700,
+                    }}>
+                      {r.requestedTime || '終日'}
+                    </span>
+                  </td>
+                )}
                 {tab === 'holiday' && (
                   <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{r.requestedTime !== '終日' ? r.requestedTime : '-'}</td>
                 )}

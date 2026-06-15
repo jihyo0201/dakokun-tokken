@@ -59,6 +59,8 @@ const SettingsPage: React.FC = () => {
   const [leaveBalances, setLeaveBalances] = useState<any[]>([]);
   const [leaveGrantLoading, setLeaveGrantLoading] = useState(false);
   const [leaveGrantMessage, setLeaveGrantMessage] = useState('');
+  const [editingLeave, setEditingLeave] = useState<{ id: string; granted: number; used: number; carried: number } | null>(null);
+  const [leaveUpdateLoading, setLeaveUpdateLoading] = useState(false);
   // --- Compensatory Balances ---
   const [compensatoryBalances, setCompensatoryBalances] = useState<any[]>([]);
   // --- Manual Leave Grant Modal ---
@@ -579,7 +581,7 @@ const SettingsPage: React.FC = () => {
           入社日が設定されているユーザーに対して、労基法39条に基づき勤続年数から自動計算して付与します（6ヶ月:10日〜6.5年以上:20日）。前年度の残日数は自動繰越されます。
         </p>
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, minWidth: 600 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, minWidth: 800 }}>
             <thead>
               <tr style={{ background: '#f0fdf4' }}>
                 <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, textAlign: 'left', fontWeight: 700 }}>社員名</th>
@@ -588,8 +590,9 @@ const SettingsPage: React.FC = () => {
                 <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, fontWeight: 700 }}>繰越</th>
                 <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, fontWeight: 700 }}>消化</th>
                 <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, fontWeight: 700, color: '#15803d' }}>残日数</th>
+                <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, fontWeight: 700 }}>消化率</th>
                 <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, fontWeight: 700 }}>年5日義務</th>
-                <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, fontWeight: 700 }}>調整</th>
+                <th style={{ borderBottom: '2px solid #bbf7d0', padding: 10, fontWeight: 700 }}>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -601,7 +604,7 @@ const SettingsPage: React.FC = () => {
                   return (
                     <tr key={u.id}>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10 }}>{u.name}</td>
-                      <td colSpan={6} style={{ borderBottom: '1px solid #f3f4f6', padding: 10, color: '#888', fontSize: 13 }}>
+                      <td colSpan={7} style={{ borderBottom: '1px solid #f3f4f6', padding: 10, color: '#888', fontSize: 13 }}>
                         {u.hireDate ? '未付与' : '入社日未設定'}
                       </td>
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
@@ -614,19 +617,94 @@ const SettingsPage: React.FC = () => {
                   );
                 }
                 return userBalances.map((b: any, i: number) => {
-                  const remaining = (b.granted || 0) + (b.carried || 0) - (b.used || 0);
+                  const total = (b.granted || 0) + (b.carried || 0);
+                  const remaining = total - (b.used || 0);
+                  const usageRate = total > 0 ? Math.round(((b.used || 0) / total) * 100) : 0;
+                  const isEditing = editingLeave?.id === b.id;
+                  const el = isEditing ? editingLeave : null;
                   return (
-                    <tr key={b.id}>
+                    <tr key={b.id} style={{ background: isEditing ? '#fffbeb' : undefined }}>
                       {i === 0 ? (
                         <td rowSpan={userBalances.length} style={{ borderBottom: '1px solid #f3f4f6', padding: 10, verticalAlign: 'top', fontWeight: 600 }}>{u.name}</td>
                       ) : null}
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{b.fiscalYear}年度</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{b.granted}日</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{b.carried}日</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>{b.used}日</td>
-                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', fontWeight: 700, color: remaining <= 0 ? '#dc2626' : '#15803d' }}>
-                        {remaining}日
+                      {/* 付与 */}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        {el ? (
+                          <input
+                            type="number" min="0" max="40" step="0.5"
+                            value={el.granted}
+                            onChange={e => setEditingLeave({ ...el, granted: Number(e.target.value) })}
+                            style={{ width: 56, padding: '3px 4px', borderRadius: 4, border: '1px solid #f59e0b', fontSize: 13, textAlign: 'center' }}
+                          />
+                        ) : (
+                          <span>{b.granted}日</span>
+                        )}
                       </td>
+                      {/* 繰越 */}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        {el ? (
+                          <input
+                            type="number" min="0" max="40" step="0.5"
+                            value={el.carried}
+                            onChange={e => setEditingLeave({ ...el, carried: Number(e.target.value) })}
+                            style={{ width: 56, padding: '3px 4px', borderRadius: 4, border: '1px solid #f59e0b', fontSize: 13, textAlign: 'center' }}
+                          />
+                        ) : (
+                          <span>{b.carried}日</span>
+                        )}
+                      </td>
+                      {/* 消化 */}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        {el ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 2, justifyContent: 'center' }}>
+                            <button
+                              onClick={() => setEditingLeave({ ...el, used: Math.max(0, el.used - 0.5) })}
+                              style={{ background: '#fee2e2', border: 'none', borderRadius: 4, width: 22, height: 22, cursor: 'pointer', fontWeight: 700, fontSize: 13, color: '#dc2626' }}
+                            >−</button>
+                            <input
+                              type="number" min="0" max="40" step="0.5"
+                              value={el.used}
+                              onChange={e => setEditingLeave({ ...el, used: Number(e.target.value) })}
+                              style={{ width: 56, padding: '3px 4px', borderRadius: 4, border: '1px solid #f59e0b', fontSize: 13, textAlign: 'center' }}
+                            />
+                            <button
+                              onClick={() => setEditingLeave({ ...el, used: el.used + 0.5 })}
+                              style={{ background: '#dcfce7', border: 'none', borderRadius: 4, width: 22, height: 22, cursor: 'pointer', fontWeight: 700, fontSize: 13, color: '#15803d' }}
+                            >+</button>
+                          </div>
+                        ) : (
+                          <span style={{ fontWeight: 600 }}>{b.used}日</span>
+                        )}
+                      </td>
+                      {/* 残日数 */}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center', fontWeight: 700, color: remaining <= 0 ? '#dc2626' : '#15803d' }}>
+                        {el
+                          ? `${(el.granted + el.carried - el.used)}日`
+                          : `${remaining}日`
+                        }
+                      </td>
+                      {/* 消化率 */}
+                      <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                          <div style={{ width: 60, height: 6, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
+                            <div style={{
+                              width: `${Math.min(100, el ? ((el.granted + el.carried) > 0 ? Math.round((el.used / (el.granted + el.carried)) * 100) : 0) : usageRate)}%`,
+                              height: '100%',
+                              background: usageRate >= 80 ? '#22c55e' : usageRate >= 50 ? '#f59e0b' : '#ef4444',
+                              borderRadius: 3,
+                              transition: 'width 0.3s',
+                            }} />
+                          </div>
+                          <span style={{ fontSize: 11, color: '#6b7280' }}>
+                            {el
+                              ? `${(el.granted + el.carried) > 0 ? Math.round((el.used / (el.granted + el.carried)) * 100) : 0}%`
+                              : `${usageRate}%`
+                            }
+                          </span>
+                        </div>
+                      </td>
+                      {/* 年5日義務 */}
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
                         {(() => {
                           const totalGranted = (b.granted || 0) + (b.carried || 0);
@@ -637,35 +715,53 @@ const SettingsPage: React.FC = () => {
                           return <span style={{ background: '#fef2f2', color: '#dc2626', borderRadius: 4, padding: '1px 8px', fontSize: 11, fontWeight: 700 }}>要取得 あと{5 - used}日</span>;
                         })()}
                       </td>
+                      {/* 操作 */}
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: 10, textAlign: 'center' }}>
-                        <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                        {el ? (
+                          <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                            <button
+                              disabled={leaveUpdateLoading}
+                              onClick={async () => {
+                                setLeaveUpdateLoading(true);
+                                try {
+                                  await updateLeaveBalance(b.id, {
+                                    granted: el.granted,
+                                    used: el.used,
+                                    carried: el.carried,
+                                  });
+                                  setLeaveBalances(prev => prev.map(lb => lb.id === b.id ? {
+                                    ...lb,
+                                    granted: el.granted,
+                                    used: el.used,
+                                    carried: el.carried,
+                                  } : lb));
+                                  setEditingLeave(null);
+                                } catch (e) {
+                                  if (import.meta.env.DEV) console.error('有休更新失敗:', e);
+                                } finally {
+                                  setLeaveUpdateLoading(false);
+                                }
+                              }}
+                              style={{ background: '#2563eb', color: '#fff', border: 'none', borderRadius: 4, padding: '3px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: leaveUpdateLoading ? 0.7 : 1 }}
+                            >
+                              {leaveUpdateLoading ? '...' : '保存'}
+                            </button>
+                            <button
+                              disabled={leaveUpdateLoading}
+                              onClick={() => setEditingLeave(null)}
+                              style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 4, padding: '3px 10px', fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        ) : (
                           <button
-                            onClick={async () => {
-                              const newGranted = window.prompt('付与日数を入力してください', String(b.granted));
-                              if (newGranted === null) return;
-                              const val = Number(newGranted);
-                              if (isNaN(val) || val < 0) return;
-                              await updateLeaveBalance(b.id, { granted: val });
-                              setLeaveBalances(prev => prev.map(lb => lb.id === b.id ? { ...lb, granted: val } : lb));
-                            }}
-                            style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 4, padding: '2px 6px', fontSize: 11, color: '#6b7280', cursor: 'pointer' }}
+                            onClick={() => setEditingLeave({ id: b.id, granted: b.granted || 0, used: b.used || 0, carried: b.carried || 0 })}
+                            style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 6, padding: '4px 12px', fontSize: 12, color: '#2563eb', cursor: 'pointer', fontWeight: 500 }}
                           >
-                            付与
+                            編集
                           </button>
-                          <button
-                            onClick={async () => {
-                              const newUsed = window.prompt('消化日数を入力してください', String(b.used));
-                              if (newUsed === null) return;
-                              const val = Number(newUsed);
-                              if (isNaN(val) || val < 0) return;
-                              await updateLeaveBalance(b.id, { used: val });
-                              setLeaveBalances(prev => prev.map(lb => lb.id === b.id ? { ...lb, used: val } : lb));
-                            }}
-                            style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 4, padding: '2px 6px', fontSize: 11, color: '#6b7280', cursor: 'pointer' }}
-                          >
-                            消化
-                          </button>
-                        </div>
+                        )}
                       </td>
                     </tr>
                   );
