@@ -466,9 +466,9 @@ export const updateCompensatoryBalance = async (balanceId: string, data: { earne
 };
 
 // 承認済み休暇日の取得（打刻漏れ除外用）
-export const getApprovedLeaveDates = async (userId: string): Promise<Set<string>> => {
+export const getApprovedLeaveDates = async (userId: string): Promise<Map<string, string>> => {
   const leaveTypes = ['有休申請', '代休申請', '振替休日申請'];
-  const dates = new Set<string>();
+  const dates = new Map<string, string>(); // date -> leaveType ('終日' | '午前半休' | '午後半休')
   const q = query(
     collection(db, 'requests'),
     where('userId', '==', userId),
@@ -478,11 +478,10 @@ export const getApprovedLeaveDates = async (userId: string): Promise<Set<string>
   snapshot.docs.forEach(d => {
     const data = d.data();
     if (leaveTypes.includes(data.type)) {
-      // 有休: date が休暇日、代休/振休: requestedTime が休暇取得日
       if (data.type === '有休申請') {
-        dates.add(data.date);
+        dates.set(data.date, data.requestedTime || '終日');
       } else if (data.requestedTime && data.requestedTime !== '終日') {
-        dates.add(data.requestedTime);
+        dates.set(data.requestedTime, '終日');
       }
     }
   });

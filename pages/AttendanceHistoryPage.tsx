@@ -136,13 +136,14 @@ const AttendanceHistoryPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [standardStartTime, setStandardStartTime] = useState('');
   const [standardEndTime, setStandardEndTime] = useState('');
-  const [approvedLeaveDates, setApprovedLeaveDates] = useState<Set<string>>(new Set());
+  const [approvedLeaveDates, setApprovedLeaveDates] = useState<Map<string, string>>(new Map());
   const [closingDay, setClosingDay] = useState(10);
 
-  // 表示月管理（year, month）
+  // 表示月管理（year, month）— closingDay取得後に補正
   const now = new Date();
   const [viewYear, setViewYear] = useState(now.getFullYear());
   const [viewMonth, setViewMonth] = useState(now.getMonth() + 1);
+  const [initialAdjusted, setInitialAdjusted] = useState(false);
 
   // 修正申請モーダル用
   const [showModal, setShowModal] = useState(false);
@@ -174,6 +175,19 @@ const AttendanceHistoryPage: React.FC = () => {
     }
   }, [user]);
 
+  // closingDay取得後に今月の表示期間を補正
+  useEffect(() => {
+    if (initialAdjusted) return;
+    if (closingDay < 28 && now.getDate() > closingDay) {
+      let m = now.getMonth() + 1;
+      let y = now.getFullYear();
+      if (m === 12) { y += 1; m = 1; } else { m += 1; }
+      setViewYear(y);
+      setViewMonth(m);
+    }
+    setInitialAdjusted(true);
+  }, [closingDay]);
+
   // 月移動
   const goToPrevMonth = () => {
     if (viewMonth === 1) { setViewYear(viewYear - 1); setViewMonth(12); }
@@ -184,8 +198,13 @@ const AttendanceHistoryPage: React.FC = () => {
     else setViewMonth(viewMonth + 1);
   };
   const goToCurrentMonth = () => {
-    setViewYear(now.getFullYear());
-    setViewMonth(now.getMonth() + 1);
+    let m = now.getMonth() + 1;
+    let y = now.getFullYear();
+    if (closingDay < 28 && now.getDate() > closingDay) {
+      if (m === 12) { y += 1; m = 1; } else { m += 1; }
+    }
+    setViewYear(y);
+    setViewMonth(m);
   };
 
   // 期間計算
@@ -330,20 +349,25 @@ const AttendanceHistoryPage: React.FC = () => {
                   const isToday = date === today;
                   const isFuture = date > today;
                   const record = attendanceMap.get(date);
-                  const isLeaveDay = approvedLeaveDates.has(date);
+                  const leaveType = approvedLeaveDates.get(date); // '終日' | '午前半休' | '午後半休' | undefined
+                  const isLeaveDay = !!leaveType;
+                  const isFullLeave = leaveType === '終日';
+                  const isHalfLeave = leaveType === '午前半休' || leaveType === '午後半休';
 
                   const hasClockIn = !!record?.clockIn;
                   const hasClockOut = !!record?.clockOut;
-                  const isMissingBoth = !hasClockIn && !hasClockOut && !isWeekend && !isFuture && !isLeaveDay;
-                  const isMissingClockOut = hasClockIn && !hasClockOut && !isFuture && !isLeaveDay;
+                  const isMissingBoth = !hasClockIn && !hasClockOut && !isWeekend && !isFuture && !isFullLeave;
+                  const isMissingClockOut = hasClockIn && !hasClockOut && !isFuture && !isFullLeave;
 
                   const lateEarly = record ? detectLateEarly(record.clockIn, record.clockOut, standardStartTime, standardEndTime) : { late: 0, early: 0 };
 
                   // 行の背景色
                   let rowBg: string | undefined;
                   if (isToday) rowBg = '#eff6ff';
-                  else if (isLeaveDay) rowBg = '#f0fdf4';
-                  else if (isMissingBoth) rowBg = '#fef2f2';
+                  else if (isFullLeave) rowBg = '#f0fdf4';
+                  else if (isHalfLeave && hasClockIn && hasClockOut) rowBg = '#f0fdf4';
+                  else if (isMissingBoth && !isHalfLeave) rowBg = '#fef2f2';
+                  else if (isHalfLeave) rowBg = '#fffbeb';
                   else if (isMissingClockOut) rowBg = '#fffbeb';
                   else if (isWeekend) rowBg = '#f9fafb';
 
@@ -361,8 +385,13 @@ const AttendanceHistoryPage: React.FC = () => {
                       </td>
                       {/* 出勤 */}
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: '8px 6px', textAlign: 'center' }}>
-                        {isLeaveDay ? (
+                        {isFullLeave ? (
                           <span style={{ color: '#15803d', fontSize: 12, fontWeight: 600 }}>有休</span>
+                        ) : isHalfLeave && !hasClockIn ? (
+                          <span>
+                            <span style={{ background: '#dcfce7', color: '#15803d', borderRadius: 4, padding: '1px 6px', fontSize: 10, fontWeight: 600 }}>{leaveType}</span>
+                            {leaveType === '午後半休' && <span style={{ color: '#dc2626', fontSize: 11, fontWeight: 600, marginLeft: 4 }}>未打刻</span>}
+                          </span>
                         ) : hasClockIn ? (
                           <span>
                             {record.clockIn.toDate().toLocaleTimeString()}
@@ -380,8 +409,13 @@ const AttendanceHistoryPage: React.FC = () => {
                       </td>
                       {/* 退勤 */}
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: '8px 6px', textAlign: 'center' }}>
-                        {isLeaveDay ? (
+                        {isFullLeave ? (
                           <span style={{ color: '#15803d', fontSize: 12, fontWeight: 600 }}>-</span>
+                        ) : isHalfLeave && !hasClockOut ? (
+                          <span>
+                            <span style={{ background: '#dcfce7', color: '#15803d', borderRadius: 4, padding: '1px 6px', fontSize: 10, fontWeight: 600 }}>{leaveType}</span>
+                            {leaveType === '午前半休' && <span style={{ color: '#dc2626', fontSize: 11, fontWeight: 600, marginLeft: 4 }}>未打刻</span>}
+                          </span>
                         ) : hasClockOut ? (
                           <span>
                             {record.clockOut.toDate().toLocaleTimeString()}
@@ -413,7 +447,7 @@ const AttendanceHistoryPage: React.FC = () => {
                       </td>
                       {/* 操作 */}
                       <td style={{ borderBottom: '1px solid #f3f4f6', padding: '8px 6px', textAlign: 'center' }}>
-                        {!isFuture && !isLeaveDay && (
+                        {!isFuture && !isFullLeave && (
                           <button
                             onClick={() => openCorrectionModal(date)}
                             style={{
